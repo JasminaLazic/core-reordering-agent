@@ -1,0 +1,546 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Retail Analytics Frontend</title>
+    <style>
+      body {
+        font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+        margin: 24px;
+        max-width: 980px;
+      }
+      h2 {
+        margin-top: 0;
+      }
+      label {
+        display: block;
+        font-weight: 600;
+        margin-top: 12px;
+      }
+      input,
+      textarea,
+      button {
+        width: 100%;
+        padding: 10px;
+        margin-top: 6px;
+        box-sizing: border-box;
+      }
+      textarea {
+        resize: vertical;
+        min-height: 100px;
+      }
+      .row {
+        display: flex;
+        gap: 12px;
+        margin-top: 8px;
+      }
+      .row > div {
+        flex: 1;
+      }
+      .btnrow {
+        display: flex;
+        gap: 12px;
+        margin-top: 12px;
+      }
+      .btnrow button {
+        width: auto;
+      }
+      pre {
+        background: #0b1020;
+        color: #e6edf3;
+        padding: 12px;
+        border-radius: 8px;
+        overflow: auto;
+        font-size: 13px;
+      }
+      select {
+        width: 100%;
+        padding: 10px;
+        margin-top: 6px;
+        box-sizing: border-box;
+      }
+      .panel {
+        border: 1px solid #e5e7eb;
+        border-radius: 10px;
+        padding: 12px;
+        background: #fff;
+      }
+      .muted {
+        color: #6b7280;
+        font-size: 13px;
+      }
+      .hrow {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        justify-content: space-between;
+        margin-top: 12px;
+      }
+      .badge {
+        display: inline-block;
+        padding: 4px 8px;
+        border-radius: 999px;
+        font-size: 12px;
+        border: 1px solid #d1d5db;
+        background: #f9fafb;
+      }
+      .badge.ok { border-color: #86efac; background: #f0fdf4; }
+      .badge.warn { border-color: #fcd34d; background: #fffbeb; }
+      .badge.err { border-color: #fca5a5; background: #fef2f2; }
+      .chatbox {
+        white-space: pre-wrap;
+        background: #0b1020;
+        color: #e6edf3;
+        padding: 12px;
+        border-radius: 10px;
+        border: 1px solid #111827;
+        font-size: 14px;
+        line-height: 1.45;
+      }
+      .kv {
+        display: grid;
+        grid-template-columns: 180px 1fr;
+        gap: 6px 10px;
+        font-size: 14px;
+        margin: 8px 0 0;
+      }
+      .kv > div:nth-child(odd) {
+        color: #6b7280;
+      }
+      details {
+        margin-top: 10px;
+      }
+      details summary {
+        cursor: pointer;
+        user-select: none;
+        font-weight: 600;
+      }
+      .btn {
+        width: auto;
+        padding: 8px 10px;
+        border-radius: 8px;
+        border: 1px solid #d1d5db;
+        background: #fff;
+        cursor: pointer;
+      }
+      .btn:hover { background: #f9fafb; }
+      small {
+        color: #555;
+      }
+      code {
+        background: #f3f3f3;
+        padding: 2px 4px;
+        border-radius: 3px;
+      }
+    </style>
+  </head>
+  <body>
+    <h2>Retail Analytics</h2>
+    <small>
+      Backend default: <code>http://127.0.0.1:8000</code>.
+      Make sure you run <code>uvicorn api:app --reload --port 8000</code> from the project root.
+    </small>
+
+    <label>API Base URL</label>
+    <input id="baseUrl" value="http://127.0.0.1:8000" />
+
+    <div class="row">
+      <div>
+        <label>Store ID <small>(single, comma-separated, or <code>ALL</code>)</small></label>
+        <input id="storeId" value="STORE001" />
+      </div>
+      <div>
+        <label>Mode</label>
+        <select id="mode">
+          <option value="auto">Auto</option>
+          <option value="query">Deterministic (/api/query)</option>
+          <option value="chat">Agent (/api/chat)</option>
+        </select>
+        <small class="muted">Auto routes “why/how/recommend/optimal/margin/replenishment” to agent.</small>
+      </div>
+      <div>
+        <label>Start date</label>
+        <input id="startDate" type="date" />
+      </div>
+      <div>
+        <label>End date</label>
+        <input id="endDate" type="date" />
+      </div>
+    </div>
+
+    <div class="btnrow">
+      <button id="next2w">Next 2 weeks</button>
+      <button id="example1">Example: ranging next 2 weeks</button>
+      <button id="allStores">All stores</button>
+    </div>
+
+    <label>Prompt</label>
+    <textarea
+      id="prompt"
+      placeholder="Enter your prompt, e.g. 'Give me ranging for STORE001 for next 2 weeks.'"
+    ></textarea>
+
+    <div class="btnrow">
+      <button id="run">Run</button>
+    </div>
+
+    <h3>Result</h3>
+    <div id="pretty" class="panel">
+      <div class="muted">No results yet.</div>
+    </div>
+    <div class="hrow">
+      <div class="muted">Raw JSON (for debugging)</div>
+      <button class="btn" id="copyJson">Copy JSON</button>
+    </div>
+    <details>
+      <summary>Show raw JSON</summary>
+      <pre id="out">{}</pre>
+    </details>
+
+    <script>
+      const $ = (id) => document.getElementById(id);
+
+      function iso(d) {
+        const z = new Date(d);
+        const yyyy = z.getFullYear();
+        const mm = String(z.getMonth() + 1).padStart(2, "0");
+        const dd = String(z.getDate()).padStart(2, "0");
+        return `${yyyy}-${mm}-${dd}`;
+      }
+
+      function pickEndpoint(prompt) {
+        const mode = $("mode").value;
+        if (mode === "query") return "/api/query";
+        if (mode === "chat") return "/api/chat";
+
+        const p = (prompt || "").toLowerCase();
+        const agentish = [
+          "why", "how", "explain", "reason", "recommend", "optimal",
+          "margin", "roi", "profit",
+          "replenishment", "replenish", "what should i order", "weeks of cover", "forecast", "demand",
+          "by category", "zero sales", "compare", "performance"
+        ];
+        const shouldChat = agentish.some(k => p.includes(k));
+        return shouldChat ? "/api/chat" : "/api/query";
+      }
+
+      function badgeForType(t) {
+        if (!t) return `<span class="badge">unknown</span>`;
+        const tl = String(t).toLowerCase();
+        if (tl.includes("error")) return `<span class="badge err">${t}</span>`;
+        if (tl.includes("workflow")) return `<span class="badge warn">${t}</span>`;
+        return `<span class="badge ok">${t}</span>`;
+      }
+
+      function esc(s) {
+        return String(s ?? "").replace(/[&<>"']/g, (c) => ({
+          "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;"
+        }[c]));
+      }
+
+      function renderPretty(data) {
+        const pretty = $("pretty");
+        if (!data || typeof data !== "object") {
+          pretty.innerHTML = `<div class="muted">No data.</div>`;
+          return;
+        }
+
+        const type = data.type || (data.error ? "error" : "unknown");
+        const header = `
+          <div class="hrow">
+            <div>
+              ${badgeForType(type)}
+              ${data.agent ? `<span class="badge">${esc(data.agent)}</span>` : ""}
+            </div>
+            <div class="muted">${esc(new Date().toLocaleString())}</div>
+          </div>
+        `;
+
+        if (type === "chat" && typeof data.response === "string") {
+          pretty.innerHTML = header + `<div class="chatbox">${esc(data.response)}</div>`;
+          return;
+        }
+
+        if (type === "availability") {
+          // Simple availability score query
+          const score = data.availability_score || 0;
+          const summary = data.summary || {};
+          pretty.innerHTML = header + `
+            <div class="kv">
+              <div>Availability Score</div><div><strong>${esc(score)}/100</strong></div>
+              <div>Total Core Items</div><div>${esc(summary.total_core_items || 0)}</div>
+              <div>Ranged</div><div>${esc(summary.core_items_ranged || 0)}</div>
+              <div>In Stock</div><div>${esc(summary.core_items_in_stock || 0)}</div>
+              <div>Out of Stock</div><div>${esc(summary.core_items_out_of_stock || 0)}</div>
+              <div>Low Stock</div><div>${esc(summary.core_items_low_stock || 0)}</div>
+              <div>Not Ranged</div><div>${esc(summary.core_items_not_ranged || 0)}</div>
+            </div>
+            ${data.answer ? `<div class="chatbox" style="margin-top:10px">${esc(data.answer)}</div>` : ""}
+            ${data.insights && data.insights.length > 0 ? `
+              <div style="margin-top:10px">
+                <strong>Insights:</strong>
+                <ul style="margin:5px 0; padding-left:20px">
+                  ${data.insights.map(i => `<li>${esc(i)}</li>`).join("")}
+                </ul>
+              </div>
+            ` : ""}
+          `;
+          return;
+        }
+
+        if (type === "availability_detailed") {
+          const storeIds = data.stores ? Object.keys(data.stores) : [];
+          const first = storeIds[0] ? data.stores[storeIds[0]] : null;
+          pretty.innerHTML = header + `
+            <div class="kv">
+              <div>Availability score</div><div>${esc(data.availability_score)}</div>
+              <div>Stores</div><div>${esc(storeIds.join(", ") || "n/a")}</div>
+              <div>Out of stock</div><div>${esc(first?.out_of_stock_items?.length ?? "n/a")}</div>
+              <div>Low stock</div><div>${esc(first?.low_stock_items?.length ?? "n/a")}</div>
+            </div>
+            ${data.answer ? `<div class="chatbox" style="margin-top:10px">${esc(data.answer)}</div>` : ""}
+          `;
+          return;
+        }
+
+        if (type === "ranging") {
+          // Show detailed table with all ranging data
+          const items = data.results || data.enriched || data.items || [];
+          let tableRows = '';
+          
+          if (items.length > 0) {
+            tableRows = items.slice(0, 100).map(item => `
+              <tr>
+                <td>${esc(item.store_id || 'N/A')}</td>
+                <td>${esc(item.item_id || 'N/A')}</td>
+                <td>${esc(item.item_name || 'N/A')}</td>
+                <td>${esc(item.category || 'N/A')}</td>
+                <td>${esc(item.vm_module || 'N/A')}</td>
+                <td>${esc(item.fixture_category || 'N/A')}</td>
+                <td>${esc(item.status || 'N/A')}</td>
+                <td>${esc(item.from_date || item.ranging_date || 'N/A')}</td>
+                <td>${esc(item.to_date || 'N/A')}</td>
+              </tr>
+            `).join('');
+          }
+          
+          pretty.innerHTML = header + `
+            <div class="kv">
+              <div>Store(s)</div><div>${esc((data.store_ids || []).join(", ") || data.store_id || "n/a")}</div>
+              <div>Window</div><div>${esc(data.window_start)} → ${esc(data.window_end)}</div>
+              <div>Total Items</div><div>${esc(data.count)} ${items.length > 100 ? '(showing first 100)' : ''}</div>
+            </div>
+            ${items.length > 0 ? `
+              <div style="margin-top:20px; overflow-x:auto;">
+                <table style="width:100%; border-collapse: collapse; font-size: 13px;">
+                  <thead>
+                    <tr style="background: #f0f0f0; border-bottom: 2px solid #ccc;">
+                      <th style="padding: 8px; text-align: left; border: 1px solid #ddd;">Store</th>
+                      <th style="padding: 8px; text-align: left; border: 1px solid #ddd;">Item ID</th>
+                      <th style="padding: 8px; text-align: left; border: 1px solid #ddd;">Item Name</th>
+                      <th style="padding: 8px; text-align: left; border: 1px solid #ddd;">Category</th>
+                      <th style="padding: 8px; text-align: left; border: 1px solid #ddd;">VM Module</th>
+                      <th style="padding: 8px; text-align: left; border: 1px solid #ddd;">Fixture</th>
+                      <th style="padding: 8px; text-align: left; border: 1px solid #ddd;">Status</th>
+                      <th style="padding: 8px; text-align: left; border: 1px solid #ddd;">From Date</th>
+                      <th style="padding: 8px; text-align: left; border: 1px solid #ddd;">To Date</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    ${tableRows}
+                  </tbody>
+                </table>
+              </div>
+            ` : '<div style="margin-top:10px; color: #666;">No ranging items found.</div>'}
+            <div class="muted" style="margin-top:10px">Showing detailed ranging table. Use raw JSON for export.</div>
+          `;
+          return;
+        }
+
+        if (type === "space_ranging") {
+          const rows = data.results || [];
+          const columns = (data.columns && data.columns.length > 0)
+            ? data.columns
+            : (rows[0] ? Object.keys(rows[0]) : []);
+          const limited = rows.slice(0, 150);
+
+          const head = columns.map(c => `
+            <th style="padding: 8px; text-align: left; border: 1px solid #ddd; white-space: nowrap;">
+              ${esc(c)}
+            </th>
+          `).join("");
+
+          const body = limited.map(r => `
+            <tr>
+              ${columns.map(c => `<td style="padding: 8px; border: 1px solid #ddd;">${esc(r[c])}</td>`).join("")}
+            </tr>
+          `).join("");
+
+          pretty.innerHTML = header + `
+            <div class="kv">
+              <div>Store</div><div>${esc(data.store_id)}</div>
+              <div>Window</div><div>${esc(data.window_start)} → ${esc(data.window_end)}</div>
+              <div>Total Rows</div><div>${esc(data.count)} ${rows.length > 150 ? '(showing first 150)' : ''}</div>
+            </div>
+            ${rows.length > 0 ? `
+              <div style="margin-top:20px; overflow-x:auto;">
+                <table style="width:100%; border-collapse: collapse; font-size: 12px;">
+                  <thead>
+                    <tr style="background: #f0f0f0; border-bottom: 2px solid #ccc;">
+                      ${head}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    ${body}
+                  </tbody>
+                </table>
+              </div>
+            ` : '<div style="margin-top:10px; color: #666;">No ranging rows found for this window.</div>'}
+            <div class="muted" style="margin-top:10px">SQL-style output from space_data_demo.sqlite.</div>
+          `;
+          return;
+        }
+
+        if (type === "space_ranging_time_based") {
+          const rows = data.results || [];
+          const columns = (data.columns && data.columns.length > 0)
+            ? data.columns
+            : (rows[0] ? Object.keys(rows[0]) : []);
+          const limited = rows.slice(0, 150);
+
+          const head = columns.map(c => `
+            <th style="padding: 8px; text-align: left; border: 1px solid #ddd; white-space: nowrap;">
+              ${esc(c)}
+            </th>
+          `).join("");
+
+          const body = limited.map(r => `
+            <tr>
+              ${columns.map(c => `<td style="padding: 8px; border: 1px solid #ddd;">${esc(r[c])}</td>`).join("")}
+            </tr>
+          `).join("");
+
+          pretty.innerHTML = header + `
+            ${data.answer ? `<div class="chatbox" style="margin-top:10px">${esc(data.answer)}</div>` : ""}
+            <div class="kv">
+              <div>Store</div><div>${esc(data.store_id)}</div>
+              <div>Item</div><div>${esc(data.item_id || "ALL")}</div>
+              <div>Window</div><div>${esc(data.window_start)} → ${esc(data.window_end)}</div>
+              <div>Total Rows</div><div>${esc(data.count)} ${rows.length > 150 ? '(showing first 150)' : ''}</div>
+            </div>
+            ${rows.length > 0 ? `
+              <div style="margin-top:20px; overflow-x:auto;">
+                <table style="width:100%; border-collapse: collapse; font-size: 12px;">
+                  <thead>
+                    <tr style="background: #f0f0f0; border-bottom: 2px solid #ccc;">
+                      ${head}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    ${body}
+                  </tbody>
+                </table>
+              </div>
+            ` : '<div style="margin-top:10px; color: #666;">No time-based ranging rows found for this window.</div>'}
+            <div class="muted" style="margin-top:10px">Includes EffectiveFromDate, EffectiveToDate and ActiveDaysInWindow.</div>
+          `;
+          return;
+        }
+
+        if (type === "margin_validation_write") {
+          pretty.innerHTML = header + `
+            <div class="chatbox">${esc(data.message || "Margin validation write completed.")}</div>
+            <div class="kv">
+              <div>File</div><div>${esc(data.file || "data/items.json")}</div>
+              <div>Annotated items</div><div>${esc(data.annotated_items_count ?? 0)}</div>
+              <div>Critical issues</div><div>${esc(data.critical_count ?? 0)}</div>
+              <div>Warnings</div><div>${esc(data.warning_count ?? 0)}</div>
+            </div>
+          `;
+          return;
+        }
+
+        if (type === "workflow" && data.payload) {
+          const p = data.payload;
+          pretty.innerHTML = header + `
+            <div class="kv">
+              <div>Store</div><div>${esc(data.store_id || "n/a")}</div>
+              <div>Status</div><div>${esc(p?.status || "n/a")}</div>
+            </div>
+            <div class="muted" style="margin-top:10px">Open raw JSON for the full workflow payload.</div>
+          `;
+          return;
+        }
+
+        if (data.error) {
+          pretty.innerHTML = header + `
+            <div class="chatbox">${esc(data.error)}</div>
+            ${data.hint ? `<div class="muted" style="margin-top:10px">${esc(data.hint)}</div>` : ""}
+          `;
+          return;
+        }
+
+        pretty.innerHTML = header + `<div class="muted">No pretty renderer for this type. Open raw JSON.</div>`;
+      }
+
+      $("next2w").onclick = () => {
+        const start = new Date();
+        const end = new Date();
+        end.setDate(end.getDate() + 14);
+        $("startDate").value = iso(start);
+        $("endDate").value = iso(end);
+      };
+
+      $("example1").onclick = () => {
+        $("next2w").click();
+        const s = $("storeId").value.trim() || "STORE001";
+        $("prompt").value = `Give me ranging for ${s} for next 2 weeks. Include the window_start and window_end dates.`;
+      };
+
+      $("allStores").onclick = () => {
+        $("storeId").value = "ALL";
+      };
+
+      $("copyJson").onclick = async () => {
+        try {
+          await navigator.clipboard.writeText($("out").textContent || "");
+        } catch (e) {}
+      };
+
+      $("run").onclick = async () => {
+        $("out").textContent = "Loading...";
+        $("pretty").innerHTML = `<div class="muted">Loading...</div>`;
+        const baseUrl = $("baseUrl").value.replace(/\/+$/, "");
+        const prompt = $("prompt").value || "";
+        const endpoint = pickEndpoint(prompt);
+
+        let payload;
+        if (endpoint === "/api/chat") {
+          payload = { message: prompt, store_id: $("storeId").value };
+        } else {
+          payload = {
+            prompt,
+            store_id: $("storeId").value,
+            start_date: $("startDate").value || null,
+            end_date: $("endDate").value || null,
+          };
+        }
+
+        try {
+          const resp = await fetch(`${baseUrl}${endpoint}`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+          });
+          const data = await resp.json();
+          $("out").textContent = JSON.stringify(data, null, 2);
+          renderPretty(data);
+        } catch (e) {
+          $("out").textContent = JSON.stringify({ error: String(e) }, null, 2);
+          renderPretty({ type: "error", error: String(e) });
+        }
+      };
+    </script>
+  </body>
+ </html>
+

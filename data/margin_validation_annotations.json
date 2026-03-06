@@ -1,0 +1,152 @@
+{
+  "generated_at": "2026-03-03T14:13:40.188940Z",
+  "annotated_items_count": 1,
+  "critical_count": 0,
+  "warning_count": 2,
+  "items": [
+    {
+      "item_id": "ITEM001",
+      "item_name": "Premium Coffee Beans 500g",
+      "errorsAndWarnings": []
+    },
+    {
+      "item_id": "ITEM002",
+      "item_name": "Organic Green Tea 250g",
+      "errorsAndWarnings": []
+    },
+    {
+      "item_id": "ITEM003",
+      "item_name": "Artisan Chocolate Bar 100g",
+      "errorsAndWarnings": []
+    },
+    {
+      "item_id": "ITEM004",
+      "item_name": "Premium Olive Oil 500ml",
+      "errorsAndWarnings": []
+    },
+    {
+      "item_id": "ITEM005",
+      "item_name": "Organic Honey 350g",
+      "errorsAndWarnings": []
+    },
+    {
+      "item_id": "ITEM006",
+      "item_name": "Gourmet Pasta 500g",
+      "errorsAndWarnings": []
+    },
+    {
+      "item_id": "ITEM007",
+      "item_name": "Premium Cheddar Cheese 250g",
+      "errorsAndWarnings": []
+    },
+    {
+      "item_id": "ITEM008",
+      "item_name": "Organic Yogurt 500g",
+      "errorsAndWarnings": []
+    },
+    {
+      "item_id": "ITEM009",
+      "item_name": "Artisan Bread Loaf",
+      "errorsAndWarnings": []
+    },
+    {
+      "item_id": "ITEM010",
+      "item_name": "Premium Jam 300g",
+      "errorsAndWarnings": []
+    },
+    {
+      "item_id": "ITEM011",
+      "item_name": "Organic Granola 400g",
+      "errorsAndWarnings": []
+    },
+    {
+      "item_id": "ITEM012",
+      "item_name": "Premium Nuts Mix 200g",
+      "errorsAndWarnings": []
+    },
+    {
+      "item_id": "ITEM013",
+      "item_name": "Gourmet Cookies 300g",
+      "errorsAndWarnings": []
+    },
+    {
+      "item_id": "ITEM014",
+      "item_name": "Premium Wine 750ml",
+      "errorsAndWarnings": []
+    },
+    {
+      "item_id": "ITEM015",
+      "item_name": "Organic Juice 1L",
+      "errorsAndWarnings": []
+    },
+    {
+      "item_id": "ITEM016",
+      "item_name": "Wireless Headphones Premium",
+      "errorsAndWarnings": []
+    },
+    {
+      "item_id": "ITEM017",
+      "item_name": "Smart Watch Basic",
+      "errorsAndWarnings": []
+    },
+    {
+      "item_id": "ITEM018",
+      "item_name": "Phone Charger Cable",
+      "errorsAndWarnings": [
+        {
+          "severity": "WARNING",
+          "rule": "item.cost_not_above_price",
+          "message": "unit_cost is above unit_price (negative per-unit margin).",
+          "context": {
+            "unit_price": 9.99,
+            "unit_cost": 23.5
+          }
+        },
+        {
+          "severity": "WARNING",
+          "rule": "item.margin_percent_consistency",
+          "message": "margin_percent differs from computed value by >2pp.",
+          "context": {
+            "declared_margin_percent": 75.0,
+            "computed_margin_percent": -135.24
+          }
+        }
+      ]
+    },
+    {
+      "item_id": "ITEM019",
+      "item_name": "Premium Potato Chips 200g",
+      "errorsAndWarnings": []
+    },
+    {
+      "item_id": "ITEM020",
+      "item_name": "Organic Trail Mix 300g",
+      "errorsAndWarnings": []
+    },
+    {
+      "item_id": "ITEM021",
+      "item_name": "Organic Face Cream 50ml",
+      "errorsAndWarnings": []
+    },
+    {
+      "item_id": "ITEM022",
+      "item_name": "Natural Shampoo 400ml",
+      "errorsAndWarnings": []
+    },
+    {
+      "item_id": "ITEM023",
+      "item_name": "Vintage Wine Collection 750ml",
+      "errorsAndWarnings": []
+    },
+    {
+      "item_id": "ITEM024",
+      "item_name": "Specialty Coffee Grinder",
+      "errorsAndWarnings": []
+    },
+    {
+      "item_id": "ITEM025",
+      "item_name": "Artisan Cheese Board Set",
+      "errorsAndWarnings": []
+    }
+  ]
+}
