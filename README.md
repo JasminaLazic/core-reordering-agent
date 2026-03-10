@@ -8,7 +8,7 @@ Standalone extraction of the core ordering components from `azure-agents/retail-
 - Core ordering tools (`agents/tools/core_ordering_tools.py`)
 - FastAPI entrypoint (`api.py`) with `/api/query` and `/api/chat`
 - Auth and config (`auth.py`, `config.py`)
-- Core scripts (`scripts/run_core_ordering_agent.py`, `scripts/create_planningtools_mock_sqlite.py`)
+- Core scripts (`scripts/run_core_ordering_agent.py`)
 - Core setup doc (`docs/CORE_ORDERING_AGENT_SETUP.md`)
 - Data directory (`data/`)
 

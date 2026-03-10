@@ -2,15 +2,12 @@ AI_FOUNDRY_PROJECT_ENDPOINT=https://your-project.openai.azure.com/
 MODEL_DEPLOYMENT_NAME=gpt-4o-mini
 CORE_ORDERING_AGENT_ID=asst_xxxxxxxxxxxxxxxxxxxxxxxx
 
-# PlanningTools DB - use either full connection string...
-PLANNING_TOOLS_SQL_CONNECTION_STRING=DRIVER={ODBC Driver 18 for SQL Server};SERVER=...;DATABASE=PlanningToolsDb;UID=...;PWD=...;Encrypt=yes;TrustServerCertificate=yes;
-
-# ...or split settings.
-# PLANNING_TOOLS_SQL_SERVER=server-name.database.windows.net
-# PLANNING_TOOLS_SQL_DATABASE=PlanningToolsDb
+# PlanningTools DB (SQL Server)
+PLANNING_TOOLS_SQL_SERVER=cph-tst-sql01
+PLANNING_TOOLS_SQL_DATABASE=PlanningToolsDb
 # PLANNING_TOOLS_SQL_USERNAME=readonly_user
 # PLANNING_TOOLS_SQL_PASSWORD=readonly_password
-# PLANNING_TOOLS_SQL_DRIVER=ODBC Driver 18 for SQL Server
+PLANNING_TOOLS_SQL_DRIVER=ODBC Driver 18 for SQL Server
 
 # Auth mode (optional)
 # AZURE_AUTH_USE_CLI=true

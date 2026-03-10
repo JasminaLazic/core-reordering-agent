@@ -24,34 +24,11 @@ The agent can:
 
 You should expose PlanningToolsDB via SQL connection env vars (read-only account):
 
-- `PLANNING_TOOLS_SQL_CONNECTION_STRING`
-  - Recommended single var format:
-  - `DRIVER={ODBC Driver 18 for SQL Server};SERVER=...;DATABASE=PlanningTools;UID=...;PWD=...;Encrypt=yes;TrustServerCertificate=yes;`
-
-Alternative split vars:
-
 - `PLANNING_TOOLS_SQL_SERVER`
 - `PLANNING_TOOLS_SQL_DATABASE` (default: `PlanningTools`)
 - `PLANNING_TOOLS_SQL_USERNAME`
 - `PLANNING_TOOLS_SQL_PASSWORD`
 - `PLANNING_TOOLS_SQL_DRIVER` (default: `ODBC Driver 18 for SQL Server`)
-
-### Local mock mode (SQLite, no real SQL Server yet)
-
-You can run the same tools against a local mock DB:
-
-```bash
-python3 scripts/create_planningtools_mock_sqlite.py
-```
-
-Then set:
-
-```bash
-PLANNING_TOOLS_SQLITE_PATH=/absolute/path/to/retail-analytics/data/planningtools_mock.sqlite
-```
-
-When `PLANNING_TOOLS_SQLITE_PATH` is set, core ordering tools use SQLite mock data.
-When it is not set, they use SQL Server settings above.
 
 Important:
 - Use a SQL user with **read-only permissions**.

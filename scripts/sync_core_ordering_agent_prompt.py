@@ -2,78 +2,13 @@ import asyncio
 
 from azure.ai.projects.aio import AIProjectClient
 from azure.ai.projects.models import PromptAgentDefinition
-from agent_framework import Agent
-from agent_framework.azure import AzureAIAgentClient
+
 from auth import get_azure_credential
-
-from config import (
-    AI_FOUNDRY_PROJECT_ENDPOINT,
-    MODEL_DEPLOYMENT_NAME,
-    CORE_ORDERING_AGENT_ID,
-)
-from agents.tools.core_ordering_tools import (
-    get_core_ordering_schema_reference,
-    get_stock_warehouse_on_hand,
-    get_stock_store_on_hand,
-    get_store_warehouse_relationship,
-    get_core_assortment,
-    get_forecast_store_sales,
-    get_calc_timeline_day,
-    get_calc_timeline_week,
-    get_calc_store_stock,
-    get_calc_warehouse_stock,
-    get_item_warehouse,
-    get_item_warehouse_order_qty,
-    get_item_warehouse_leadtime,
-    get_config_store_cover,
-    get_config_warehouse_cover,
-    get_import_cover_config,
-    get_job_control,
-    get_job_control_history,
-    run_planning_tools_readonly_query,
-)
+from config import AI_FOUNDRY_PROJECT_ENDPOINT, MODEL_DEPLOYMENT_NAME
+from agents.core_ordering_agent import create_core_ordering_agent
 
 
-async def get_core_ordering_agent() -> Agent:
-    if not CORE_ORDERING_AGENT_ID:
-        raise RuntimeError("Missing CORE_ORDERING_AGENT_ID in .env (create the agent once first).")
-
-    async with get_azure_credential() as credential:
-        return Agent(
-            client=AzureAIAgentClient(
-                project_endpoint=AI_FOUNDRY_PROJECT_ENDPOINT,
-                credential=credential,
-                agent_id=CORE_ORDERING_AGENT_ID,
-            ),
-            tools=[
-                get_core_ordering_schema_reference,
-                get_stock_warehouse_on_hand,
-                get_stock_store_on_hand,
-                get_store_warehouse_relationship,
-                get_core_assortment,
-                get_forecast_store_sales,
-                get_calc_timeline_day,
-                get_calc_timeline_week,
-                get_calc_store_stock,
-                get_calc_warehouse_stock,
-                get_item_warehouse,
-                get_item_warehouse_order_qty,
-                get_item_warehouse_leadtime,
-                get_config_store_cover,
-                get_config_warehouse_cover,
-                get_import_cover_config,
-                get_job_control,
-                get_job_control_history,
-                run_planning_tools_readonly_query,
-            ],
-            store=True,
-        )
-
-
-async def create_core_ordering_agent() -> str:
-    async with get_azure_credential() as credential:
-        async with AIProjectClient(endpoint=AI_FOUNDRY_PROJECT_ENDPOINT, credential=credential) as project_client:
-            instructions = """You are the FPO Core Reordering Engine (Exact SQL Parity Mode).
+INSTRUCTIONS = """You are the FPO Core Reordering Engine (Exact SQL Parity Mode).
 
 MISSION
 Replicate legacy core reordering behavior as closely as possible using only available read-only base-table data and deterministic reasoning.
@@ -247,26 +182,26 @@ INTERACTION POLICY
 - No explanatory prose outside JSON.
 - If user asks natural language, still return structured JSON with same schema.
 """
-            definition = PromptAgentDefinition(
-                model=MODEL_DEPLOYMENT_NAME,
-                instructions=instructions,
-            )
 
-            if hasattr(project_client.agents, "create_agent"):
-                created = await project_client.agents.create_agent(
-                    name="CoreOrderingAgent",
-                    definition=definition,
-                )
-            else:
-                # Compatibility fallback for SDK versions exposing a private create method.
-                created = await project_client.agents._create_agent(
-                    name="CoreOrderingAgent",
-                    definition=definition,
-                )
-            return created.id
+
+async def main() -> None:
+    definition = PromptAgentDefinition(
+        model=MODEL_DEPLOYMENT_NAME,
+        instructions=INSTRUCTIONS,
+    )
+
+    async with get_azure_credential() as credential:
+        async with AIProjectClient(endpoint=AI_FOUNDRY_PROJECT_ENDPOINT, credential=credential) as client:
+            try:
+                await client.agents._update_agent("CoreOrderingAgent", definition=definition)
+                print("updated_agent=CoreOrderingAgent")
+                return
+            except Exception as e:
+                print(f"update_failed: {e}")
+
+    new_id = await create_core_ordering_agent()
+    print(f"new_agent_id={new_id}")
 
 
 if __name__ == "__main__":
-    agent_id = asyncio.run(create_core_ordering_agent())
-    print("Created agent id:", agent_id)
-    print("Add to .env: CORE_ORDERING_AGENT_ID=" + agent_id)
+    asyncio.run(main())

@@ -1,6 +1,4 @@
 import os
-import json
-import re
 from typing import Any, Dict
 
 from fastapi import FastAPI
@@ -11,7 +9,6 @@ from pydantic import BaseModel, Field
 
 from agents.core_ordering_agent import get_core_ordering_agent
 from agents.tools.core_ordering_tools import (
-    get_core_reordering_agent_payload,
     get_reorder_context,
     get_sales_history,
     get_forecast,
@@ -47,86 +44,10 @@ class ValidateProposalRequest(BaseModel):
     moq: int = 0
 
 
-def _extract_item_number_for_core_ordering(prompt: str) -> str | None:
-    m = re.search(r"\bitem(?:\s*number)?\s*[:=]?\s*(\d{4,})\b", prompt, re.IGNORECASE)
-    return m.group(1) if m else None
-
-
-def _extract_item_key_for_core_ordering(prompt: str) -> int | None:
-    m = re.search(r"\bitem[_\s-]?key\s*[:=]?\s*(\d+)\b", prompt, re.IGNORECASE)
-    return int(m.group(1)) if m else None
-
-
-def _extract_week_start_for_core_ordering(prompt: str) -> int | None:
-    m = re.search(r"\b(?:week[_\s]?start|@weekstart)\s*[:=]?\s*(\d{1,2})\b", prompt, re.IGNORECASE)
-    if not m:
-        return None
-    value = int(m.group(1))
-    return value if 1 <= value <= 53 else None
-
-
-def _extract_warehouse_code_for_core_ordering(prompt: str) -> str | None:
-    explicit = re.search(
-        r"\b(?:warehouse|central_warehouse_code|wh|dc)\s*[:=]?\s*([A-Z0-9]{2,12})\b",
-        prompt,
-        re.IGNORECASE,
-    )
-    if explicit:
-        return explicit.group(1).upper()
-
-    generic = re.search(r"\b([A-Z]{1,4}\d{2}(?:WH)?)\b", prompt.upper())
-    return generic.group(1) if generic else None
-
-
 def _build_core_ordering_grounded_prompt(prompt: str) -> str:
-    item_number = _extract_item_number_for_core_ordering(prompt)
-    item_key = _extract_item_key_for_core_ordering(prompt)
-    week_start = _extract_week_start_for_core_ordering(prompt) or 1
-    warehouse_code = _extract_warehouse_code_for_core_ordering(prompt)
-
-    if not item_number and item_key is None:
-        return (
-            f"{prompt}\n\n"
-            "Missing required item identifier.\n"
-            "Return JSON only: {\"quantity\": 0, \"reason\": \"Insufficient data\"}."
-        )
-
-    try:
-        payload = get_core_reordering_agent_payload(
-            week_start=week_start,
-            item_scope="item",
-            item_number=item_number,
-            item_key=item_key,
-            top_n=250,
-        )
-        if payload.get("payload_errors"):
-            return (
-                f"{prompt}\n\n"
-                "Deterministic payload prefetch produced blocking errors. "
-                "Return JSON only: {\"quantity\": 0, \"reason\": \"Insufficient data\"}.\n"
-                f"Blocking payload: {json.dumps(payload, default=str)}"
-            )
-        return (
-            f"{prompt}\n\n"
-            "Use FPO PlanningToolsDB tools to compute reorder quantity from row-level warehouse inputs.\n"
-            "Call get_reorder_context, get_sales_history, get_forecast, then validate_proposal.\n"
-            "Compute using row logic: available_now=on_hand+inbound, target_stock=avg_weekly_forecast*weeks_cover, raw_needed=max(0,target_stock-available_now).\n"
-            "Trigger reorder when available_now<=reorderPoint OR raw_needed>0.\n"
-            "If reorder triggered, candidate=max(raw_needed,reorderPoint,moq), then validate_proposal.\n"
-            "Enforce casePack, reorderPoint, and moq constraints.\n"
-            "If multiple warehouses appear and no warehouse is specified, return quantity 0 with reason 'Insufficient data'.\n"
-            "If required fields are missing/uncertain, return quantity 0 with reason 'Insufficient data'.\n"
-            "Output JSON only with exact shape: {\"quantity\": <int>, \"reason\": \"<string>\"}.\n"
-            f"Parsed context: item_number={item_number}, item_key={item_key}, week_start={week_start}, warehouse_code={warehouse_code}.\n"
-            f"Payload: {json.dumps(payload, default=str)}"
-        )
-    except Exception as e:
-        return (
-            f"{prompt}\n\n"
-            "Deterministic payload prefetch failed before agent reasoning.\n"
-            f"Prefetch error: {e}\n"
-            "Return JSON only: {\"quantity\": 0, \"reason\": \"Insufficient data\"}."
-        )
+    # User prompt passthrough by design. No API-side gating, extraction,
+    # deterministic prefetch, or fallback behavior.
+    return prompt
 
 
 app = FastAPI(title="Core Reordering Agent API")

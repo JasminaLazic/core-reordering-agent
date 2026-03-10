@@ -21,22 +21,16 @@ def _get_pyodbc():
 
 
 def _build_connection_string() -> str:
-    # Preferred: full connection string in env
-    full = os.environ.get("PLANNING_TOOLS_SQL_CONNECTION_STRING")
-    if full:
-        return full
-
     server = os.environ.get("PLANNING_TOOLS_SQL_SERVER")
-    database = os.environ.get("PLANNING_TOOLS_SQL_DATABASE", "PlanningToolsDb")
+    database = os.environ.get("PLANNING_TOOLS_SQL_DATABASE", "PlanningTools")
     username = os.environ.get("PLANNING_TOOLS_SQL_USERNAME")
     password = os.environ.get("PLANNING_TOOLS_SQL_PASSWORD")
     driver = os.environ.get("PLANNING_TOOLS_SQL_DRIVER", "ODBC Driver 18 for SQL Server")
 
     if not server:
         raise RuntimeError(
-            "Missing PlanningToolsDB SQL config. Set either "
-            "PLANNING_TOOLS_SQL_CONNECTION_STRING or "
-            "PLANNING_TOOLS_SQL_SERVER (+ auth variables)."
+            "Missing PlanningToolsDB SQL config. Set "
+            "PLANNING_TOOLS_SQL_SERVER (+ optional auth variables)."
         )
 
     if username and password:
@@ -102,6 +96,296 @@ def _ensure_read_only_sql(sql: str) -> None:
         raise ValueError("Query contains non-read-only statements.")
 
 
+def _normalize_top_n(top_n: int, max_n: int = 500) -> int:
+    return max(1, min(int(top_n), max_n))
+
+
+def _get_table_rows(
+    schema_table: str,
+    top_n: int = 100,
+    filters: Optional[List[Tuple[str, Any]]] = None,
+) -> Dict[str, Any]:
+    """
+    Generic read-only table fetcher for canonical PlanningToolsDB tables.
+    """
+    limit = _normalize_top_n(top_n, 500)
+    active_filters = [(col, val) for col, val in (filters or []) if val is not None]
+    where_clause = ""
+    params: List[Any] = []
+    if active_filters:
+        where_clause = "WHERE " + " AND ".join([f"{col} = ?" for col, _ in active_filters])
+        params = [v for _, v in active_filters]
+
+    sql = f"""
+SELECT TOP ({limit}) *
+FROM {schema_table}
+{where_clause}
+"""
+    rows = _query(sql, params if params else None)
+
+    return {
+        "table": schema_table,
+        "count": len(rows),
+        "filters": {k: v for k, v in active_filters},
+        "results": rows,
+    }
+
+
+def get_stock_warehouse_on_hand(
+    item_key_new: Optional[int] = None,
+    central_warehouse_key: Optional[int] = None,
+    top_n: int = 100,
+) -> Dict[str, Any]:
+    return _get_table_rows(
+        "model.tbl_StockWarehouseOnHand",
+        top_n=top_n,
+        filters=[
+            ("ItemKeyNew", item_key_new),
+            ("CentralWarehouseKey", central_warehouse_key),
+        ],
+    )
+
+
+def get_stock_store_on_hand(
+    item_key_new: Optional[int] = None,
+    store_key: Optional[int] = None,
+    top_n: int = 100,
+) -> Dict[str, Any]:
+    return _get_table_rows(
+        "model.tbl_StockStoreOnHand",
+        top_n=top_n,
+        filters=[
+            ("ItemKeyNew", item_key_new),
+            ("StoreKey", store_key),
+        ],
+    )
+
+
+def get_store_warehouse_relationship(
+    store_key: Optional[int] = None,
+    central_warehouse_key: Optional[int] = None,
+    top_n: int = 100,
+) -> Dict[str, Any]:
+    return _get_table_rows(
+        "model.tbl_StoreWarehouseRelationship",
+        top_n=top_n,
+        filters=[
+            ("StoreKey", store_key),
+            ("CentralWarehouseKey", central_warehouse_key),
+        ],
+    )
+
+
+def get_core_assortment(
+    item_key: Optional[int] = None,
+    central_warehouse_key: Optional[int] = None,
+    top_n: int = 100,
+) -> Dict[str, Any]:
+    return _get_table_rows(
+        "model.tbl_CoreAssortment",
+        top_n=top_n,
+        filters=[
+            ("ItemKey", item_key),
+            ("CentralWarehouseKey", central_warehouse_key),
+        ],
+    )
+
+
+def get_forecast_store_sales(
+    item_key: Optional[int] = None,
+    central_warehouse_key: Optional[int] = None,
+    top_n: int = 100,
+) -> Dict[str, Any]:
+    return _get_table_rows(
+        "fpo.tbl_ForecastStoreSales",
+        top_n=top_n,
+        filters=[
+            ("ItemKey", item_key),
+            ("CentralWarehouseKey", central_warehouse_key),
+        ],
+    )
+
+
+def get_calc_timeline_day(
+    calc_week_no: Optional[int] = None,
+    year_and_week: Optional[int] = None,
+    top_n: int = 100,
+) -> Dict[str, Any]:
+    return _get_table_rows(
+        "fpo.tbl_CalcTimelineDay",
+        top_n=top_n,
+        filters=[
+            ("CalcWeekNo", calc_week_no),
+            ("YearAndWeek", year_and_week),
+        ],
+    )
+
+
+def get_calc_timeline_week(
+    calc_week_no: Optional[int] = None,
+    year_and_week: Optional[int] = None,
+    top_n: int = 100,
+) -> Dict[str, Any]:
+    return _get_table_rows(
+        "fpo.tbl_CalcTimelineWeek",
+        top_n=top_n,
+        filters=[
+            ("CalcWeekNo", calc_week_no),
+            ("YearAndWeek", year_and_week),
+        ],
+    )
+
+
+def get_calc_store_stock(
+    item_key: Optional[int] = None,
+    store_key: Optional[int] = None,
+    central_warehouse_key: Optional[int] = None,
+    top_n: int = 100,
+) -> Dict[str, Any]:
+    return _get_table_rows(
+        "fpo.tbl_CalcStoreStock",
+        top_n=top_n,
+        filters=[
+            ("ItemKey", item_key),
+            ("StoreKey", store_key),
+            ("CentralWarehouseKey", central_warehouse_key),
+        ],
+    )
+
+
+def get_calc_warehouse_stock(
+    item_key: Optional[int] = None,
+    central_warehouse_key: Optional[int] = None,
+    top_n: int = 100,
+) -> Dict[str, Any]:
+    return _get_table_rows(
+        "fpo.tbl_CalcWarehouseStock",
+        top_n=top_n,
+        filters=[
+            ("ItemKey", item_key),
+            ("CentralWarehouseKey", central_warehouse_key),
+        ],
+    )
+
+
+def get_item_warehouse(
+    item_key: Optional[int] = None,
+    central_warehouse_key: Optional[int] = None,
+    central_warehouse_code: Optional[str] = None,
+    top_n: int = 100,
+) -> Dict[str, Any]:
+    return _get_table_rows(
+        "fpo.tbl_ItemWarehouse",
+        top_n=top_n,
+        filters=[
+            ("ItemKey", item_key),
+            ("CentralWarehouseKey", central_warehouse_key),
+            ("CentralWarehouseCode", central_warehouse_code),
+        ],
+    )
+
+
+def get_item_warehouse_order_qty(
+    item_key: Optional[int] = None,
+    central_warehouse_key: Optional[int] = None,
+    top_n: int = 100,
+) -> Dict[str, Any]:
+    return _get_table_rows(
+        "fpo.tbl_ItemWarehouseOrderQty",
+        top_n=top_n,
+        filters=[
+            ("ItemKey", item_key),
+            ("CentralWarehouseKey", central_warehouse_key),
+        ],
+    )
+
+
+def get_item_warehouse_leadtime(
+    item_key: Optional[int] = None,
+    central_warehouse_key: Optional[int] = None,
+    calc_week_no: Optional[int] = None,
+    top_n: int = 100,
+) -> Dict[str, Any]:
+    return _get_table_rows(
+        "fpo.tbl_ItemWarehouseLeadtime",
+        top_n=top_n,
+        filters=[
+            ("ItemKey", item_key),
+            ("CentralWarehouseKey", central_warehouse_key),
+            ("CalcWeekNo", calc_week_no),
+        ],
+    )
+
+
+def get_config_store_cover(
+    category_abc: Optional[str] = None,
+    week_of_year: Optional[int] = None,
+    top_n: int = 100,
+) -> Dict[str, Any]:
+    return _get_table_rows(
+        "fpo.tbl_ConfigStoreCover",
+        top_n=top_n,
+        filters=[
+            ("CategoryABC", category_abc),
+            ("WeekOfYear", week_of_year),
+        ],
+    )
+
+
+def get_config_warehouse_cover(
+    category_abc: Optional[str] = None,
+    week_of_year: Optional[int] = None,
+    top_n: int = 100,
+) -> Dict[str, Any]:
+    return _get_table_rows(
+        "fpo.tbl_ConfigWarehouseCover",
+        top_n=top_n,
+        filters=[
+            ("CategoryABC", category_abc),
+            ("WeekOfYear", week_of_year),
+        ],
+    )
+
+
+def get_import_cover_config(
+    central_warehouse_code: Optional[str] = None,
+    category_abc: Optional[str] = None,
+    week_of_year: Optional[int] = None,
+    top_n: int = 100,
+) -> Dict[str, Any]:
+    return _get_table_rows(
+        "fpo.tbl_ImportCoverConfig",
+        top_n=top_n,
+        filters=[
+            ("CentralWarehouseCode", central_warehouse_code),
+            ("CategoryABC", category_abc),
+            ("WeekOfYear", week_of_year),
+        ],
+    )
+
+
+def get_job_control(
+    job_name: Optional[str] = None,
+    top_n: int = 100,
+) -> Dict[str, Any]:
+    return _get_table_rows(
+        "am.tbl_JobControl",
+        top_n=top_n,
+        filters=[("JobName", job_name)],
+    )
+
+
+def get_job_control_history(
+    job_name: Optional[str] = None,
+    top_n: int = 100,
+) -> Dict[str, Any]:
+    return _get_table_rows(
+        "am.tbl_JobControlHistory",
+        top_n=top_n,
+        filters=[("JobName", job_name)],
+    )
+
+
 def _build_forecast_week_columns(total_weeks: int = 53) -> List[str]:
     return [f"ForecastWk{i:02d}" for i in range(1, total_weeks + 1)]
 
@@ -136,7 +420,6 @@ def get_core_ordering_schema_reference() -> Dict[str, Any]:
             "fpo.tbl_ConfigStoreCover": "Store cover horizon by week and ABC",
             "fpo.tbl_ConfigWarehouseCover": "Warehouse cover horizon by week and ABC",
             "fpo.tbl_ImportCoverConfig": "Configurable weeks-of-cover by warehouse/ABC/week",
-            "fpo.tbl_WarehouseOrder": "Recommended/stored/posted/actual warehouse orders",
             "am.tbl_JobControl": "Job control state table",
             "am.tbl_JobControlHistory": "Job run history",
         },
@@ -147,7 +430,6 @@ def get_core_ordering_schema_reference() -> Dict[str, Any]:
             "rounding": "ceil(required / order_multiple) * order_multiple",
         },
         "optional_reference_objects": {
-            "fpo.tvf_OrderLoad": "Optional object for output-shape comparison",
             "fpo.usp_RefreshOrderData": "Operational refresh object",
             "fpo.usp_RecalcWarehouseStock": "Operational recalculation object",
         },
@@ -180,163 +462,57 @@ def get_core_reordering_agent_payload(
     iteration_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
-    Build a normalized, deterministic payload for the FPO core reordering agent.
-    This function is read-only and mirrors deterministic data preparation only.
+    Read-only data fetch payload for the FPO core reordering agent.
+    No decision logic or fail-closed logic is applied here.
     """
     if week_start < 1 or week_start > 53:
         raise ValueError("week_start must be between 1 and 53")
-    limit = max(1, min(top_n, 2000))
+    limit = _normalize_top_n(top_n, 2000)
 
     now_iso = _to_iso8601_utc_now()
     iteration = iteration_id or f"core_reorder_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
 
-    filter_params: List[Any] = []
-    warehouse_where: List[str] = []
-    store_where: List[str] = []
-    orders_where: List[str] = []
-    constraints_where: List[str] = []
-    issue_where: List[str] = []
+    timeline_rows = get_calc_timeline_week(
+        calc_week_no=None,
+        year_and_week=None,
+        top_n=53,
+    )["results"]
 
-    item_join = ""
     if item_number:
-        item_join = "JOIN bicache.tbl_Item i ON cws.ItemKey = i.ItemKey"
-        warehouse_where.append("i.ItemNumber = ?")
-        store_where.append("i.ItemNumber = ?")
-        orders_where.append("i.ItemNumber = ?")
-        constraints_where.append("i.ItemNumber = ?")
-        issue_where.append("i.ItemNumber = ?")
-        filter_params.append(item_number)
-
-    if item_key is not None:
-        warehouse_where.append("cws.ItemKey = ?")
-        store_where.append("css.ItemKey = ?")
-        orders_where.append("wo.ItemKey = ?")
-        constraints_where.append("iw.ItemKey = ?")
-        issue_where.append("iw.ItemKey = ?")
-        filter_params.append(item_key)
-
-    warehouse_where_sql = ("WHERE " + " AND ".join(warehouse_where)) if warehouse_where else ""
-    store_where_sql = ("WHERE " + " AND ".join(store_where)) if store_where else ""
-    orders_where_sql = ("WHERE " + " AND ".join(orders_where)) if orders_where else ""
-    constraints_where_sql = ("WHERE " + " AND ".join(constraints_where)) if constraints_where else ""
-    issue_where_sql = ("WHERE " + " AND ".join(issue_where)) if issue_where else ""
-
-    timeline_sql = """
-SELECT
-    CalcWeekNo,
-    YearAndWeek,
-    WeekStartDate,
-    WeekEndDate
-FROM fpo.tbl_CalcTimelineWeek
-WHERE CalcWeekNo BETWEEN 1 AND 53
-ORDER BY CalcWeekNo
-"""
-    timeline_rows, timeline_err = _query_safe(timeline_sql)
-
-    warehouse_sql = f"""
-SELECT TOP ({limit})
-    cws.*
-FROM fpo.tbl_CalcWarehouseStock cws
-{item_join}
-{warehouse_where_sql}
-ORDER BY cws.ItemKey, cws.CentralWarehouseKey
-"""
-    warehouse_rows, warehouse_err = _query_safe(warehouse_sql, filter_params if filter_params else None)
-
-    store_sql = f"""
-SELECT TOP ({limit})
-    css.*
-FROM fpo.tbl_CalcStoreStock css
-LEFT JOIN bicache.tbl_Item i ON css.ItemKey = i.ItemKey
-{store_where_sql}
-ORDER BY css.ItemKey, css.StoreKey, css.CentralWarehouseKey
-"""
-    store_rows, store_err = _query_safe(store_sql, filter_params if filter_params else None)
-
-    order_sql = f"""
-SELECT TOP ({limit})
-    wo.*
-FROM fpo.tbl_WarehouseOrder wo
-LEFT JOIN bicache.tbl_Item i ON wo.ItemKey = i.ItemKey
-{orders_where_sql}
-ORDER BY wo.ItemKey, wo.CentralWarehouseKey, wo.DeliveryDate
-"""
-    order_rows, order_err = _query_safe(order_sql, filter_params if filter_params else None)
-
-    constraints_sql = f"""
-SELECT TOP ({limit})
-    iw.ItemKey,
-    iw.CentralWarehouseKey,
-    iw.ReqPO,
-    iw.SafetyStockQty,
-    iw.MOQ,
-    iw.CentralWarehouseCode,
-    iw.CentralWarehouseCountryCode,
-    oq.OrderQtyType,
-    COALESCE(oq.AOQ, 0) AS AOQ,
-    COALESCE(oq.EOQ, 0) AS EOQ,
-    COALESCE(oq.LOQ, 0) AS LOQ,
-    COALESCE(oq.SOQ, 0) AS SOQ,
-    COALESCE(iw.NumberOfUnitsPerParcelForStore, 0) AS NumberOfUnitsPerParcelForStore,
-    COALESCE(iw.NumberOfUnitsPerParcelForPurchase, 0) AS NumberOfUnitsPerParcelForPurchase,
-    COALESCE(iw.NumberOfUnitsPerPallet, 0) AS NumberOfUnitsPerPallet
-FROM fpo.tbl_ItemWarehouse iw
-LEFT JOIN fpo.tbl_ItemWarehouseOrderQty oq
-    ON oq.ItemKey = iw.ItemKey
-    AND oq.CentralWarehouseKey = iw.CentralWarehouseKey
-LEFT JOIN bicache.tbl_Item i ON iw.ItemKey = i.ItemKey
-{constraints_where_sql}
-ORDER BY iw.ItemKey, iw.CentralWarehouseKey
-"""
-    constraints_rows, constraints_err = _query_safe(constraints_sql, filter_params if filter_params else None)
-
-    issues_sql = f"""
-SELECT TOP ({limit})
-    iw.ItemKey,
-    iw.CentralWarehouseKey,
-    iw.HasAnyIssue,
-    iw.HasCalcIssue,
-    iw.HasPostIssue
-FROM fpo.tbl_ItemWarehouse iw
-LEFT JOIN bicache.tbl_Item i ON iw.ItemKey = i.ItemKey
-{issue_where_sql}
-ORDER BY iw.ItemKey, iw.CentralWarehouseKey
-"""
-    issue_rows, issue_err = _query_safe(issues_sql, filter_params if filter_params else None)
-
-    errors: List[Dict[str, Any]] = []
-    if timeline_err:
-        errors.append({"section": "timeline", "error": timeline_err})
-    if warehouse_err:
-        errors.append({"section": "item_warehouse_state", "error": warehouse_err})
-    if store_err:
-        errors.append({"section": "item_store_state", "error": store_err})
-    if order_err:
-        errors.append({"section": "existing_orders", "error": order_err})
-    if constraints_err:
-        errors.append({"section": "constraints", "error": constraints_err})
-    if issue_err:
-        errors.append({"section": "data_quality_flags", "error": issue_err})
-
-    if not timeline_rows:
-        errors.append({"section": "timeline", "error": "No timeline rows found"})
-    if not warehouse_rows:
-        errors.append({"section": "item_warehouse_state", "error": "No calc warehouse rows found"})
-
-    blocking_error_actions: List[Dict[str, Any]] = []
-    if errors:
-        blocking_error_actions.append(
-            {
-                "action": "error",
-                "reason_code": "PRE",
-                "error_code": "MISSING_REQUIRED_INPUTS",
-                "message": "Fail-closed: required payload sections are missing or unreadable.",
-                "details": errors,
-                "run_id": iteration,
-                "iteration_id": iteration,
-                "timestamp_utc": now_iso,
-            }
+        item_rows = _query(
+            """
+SELECT TOP (1) ItemKey
+FROM bicache.tbl_Item
+WHERE ItemNumber = ?
+""",
+            [item_number],
         )
+        if item_rows:
+            item_key = int(item_rows[0]["ItemKey"])
+
+    item_warehouse_state = get_calc_warehouse_stock(
+        item_key=item_key,
+        central_warehouse_key=None,
+        top_n=limit,
+    )["results"]
+    item_store_state = get_calc_store_stock(
+        item_key=item_key,
+        store_key=None,
+        central_warehouse_key=None,
+        top_n=limit,
+    )["results"]
+    constraints = get_item_warehouse(
+        item_key=item_key,
+        central_warehouse_key=None,
+        central_warehouse_code=None,
+        top_n=limit,
+    )["results"]
+    data_quality_flags = get_item_warehouse(
+        item_key=item_key,
+        central_warehouse_key=None,
+        central_warehouse_code=None,
+        top_n=limit,
+    )["results"]
 
     return {
         "run_context": {
@@ -346,28 +522,24 @@ ORDER BY iw.ItemKey, iw.CentralWarehouseKey
             "week_start": week_start,
             "today": now_iso[:10],
             "iteration_id": iteration,
-            "strict_mode": True,
-            "required_step_sequence": ["W1", "S2", "W3", "R4", "S5", "C6", "R7"],
         },
         "timeline": timeline_rows,
-        "item_warehouse_state": warehouse_rows,
-        "item_store_state": store_rows,
-        "existing_orders": order_rows,
-        "constraints": constraints_rows,
-        "data_quality_flags": issue_rows,
-        "blocking_error_actions": blocking_error_actions,
-        "payload_errors": errors,
+        "item_warehouse_state": item_warehouse_state,
+        "item_store_state": item_store_state,
+        "existing_orders": [],
+        "constraints": constraints,
+        "data_quality_flags": data_quality_flags,
         "meta": {
             "counts": {
                 "timeline": len(timeline_rows),
-                "item_warehouse_state": len(warehouse_rows),
-                "item_store_state": len(store_rows),
-                "existing_orders": len(order_rows),
-                "constraints": len(constraints_rows),
-                "data_quality_flags": len(issue_rows),
+                "item_warehouse_state": len(item_warehouse_state),
+                "item_store_state": len(item_store_state),
+                "existing_orders": 0,
+                "constraints": len(constraints),
+                "data_quality_flags": len(data_quality_flags),
             },
             "generated_at_utc": now_iso,
-            "source": "deterministic_prepared_payload",
+            "source": "raw_table_fetch_payload",
             "week_columns_supported": {
                 "forecast": _build_week_columns("ForecastWk", 53),
                 "demand": _build_week_columns("DemandWk", 53),
