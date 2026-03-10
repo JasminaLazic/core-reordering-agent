@@ -22,6 +22,8 @@ pip install fastapi uvicorn pyodbc
 ```
 
 2. Create `.env` from `ENV_EXAMPLE` and set values.
+   - For offline local testing, set `IS_LOCAL=true` to use built-in mock PlanningTools tables/data.
+   - For real SQL Server usage, set `IS_LOCAL=false` (or omit) and provide `PLANNING_TOOLS_SQL_*` values.
 
 3. Run API:
 

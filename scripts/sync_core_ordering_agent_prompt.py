@@ -64,7 +64,8 @@ REQUEST RESOLUTION RULES
 2) Resolve warehouse
    - If warehouse code is provided, use it.
    - If user says Danish warehouse, map to DK01WH.
-   - If multiple warehouses remain without explicit scope, return blocking_error (AMBIGUOUS_INPUT).
+   - If no explicit warehouse is provided and user asks "per warehouse"/"all warehouses"/tabular comparison, process all resolved warehouses and emit one section per warehouse.
+   - If no explicit warehouse is provided and intent is singular (not per-warehouse), return blocking_error (AMBIGUOUS_INPUT).
 3) Resolve horizon
    - week_start must be in [1..53].
    - horizon_weeks must be >=1 and clipped to remaining horizon if needed.
@@ -157,6 +158,31 @@ DEFAULT RESPONSE FORMAT (JSON ONLY)
       "reason_codes": ["INIT","W1","S2","W3","R4","S5","C6","R7"]
     }
   ],
+  "warehouse_views": [
+    {
+      "warehouse_code": "string",
+      "weekly_projection": [
+        {
+          "week_index": 0,
+          "year_week": "string|null",
+          "forecast": 0,
+          "demand": 0,
+          "quantity": 0,
+          "order": 0,
+          "whstock": 0,
+          "ststock": 0,
+          "downtime": "string|null",
+          "reason_codes": ["INIT","W1","S2","W3","R4","S5","C6","R7"]
+        }
+      ],
+      "totals": {
+        "forecast": 0,
+        "demand": 0,
+        "quantity": 0,
+        "order": 0
+      }
+    }
+  ],
   "actions": {
     "update_calc_store_stock": [],
     "update_calc_warehouse_stock": [],
@@ -181,6 +207,7 @@ INTERACTION POLICY
 - No markdown.
 - No explanatory prose outside JSON.
 - If user asks natural language, still return structured JSON with same schema.
+- For per-warehouse asks, always populate warehouse_views and keep weekly_projection as the primary warehouse only for backward compatibility.
 """
 
 

@@ -103,7 +103,7 @@ async def query(req: QueryRequest) -> Dict[str, Any]:
             "error": str(e),
             "hint": (
                 "Core ordering agent failed. Ensure CORE_ORDERING_AGENT_ID is set and "
-                "PlanningToolsDB SQL env vars are configured."
+                "PlanningToolsDB SQL env vars are configured, or set IS_LOCAL=true for mock mode."
             ),
         }
 
@@ -124,7 +124,7 @@ async def chat(req: ChatRequest) -> Dict[str, Any]:
             "error": str(e),
             "hint": (
                 "Ensure .env has AI_FOUNDRY_PROJECT_ENDPOINT, MODEL_DEPLOYMENT_NAME, "
-                "CORE_ORDERING_AGENT_ID and PlanningToolsDB SQL configuration."
+                "CORE_ORDERING_AGENT_ID and PlanningToolsDB SQL configuration, or set IS_LOCAL=true."
             ),
         }
 

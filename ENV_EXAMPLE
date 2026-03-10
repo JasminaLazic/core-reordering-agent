@@ -1,13 +1,12 @@
-AI_FOUNDRY_PROJECT_ENDPOINT=https://your-project.openai.azure.com/
-MODEL_DEPLOYMENT_NAME=gpt-4o-mini
-CORE_ORDERING_AGENT_ID=asst_xxxxxxxxxxxxxxxxxxxxxxxx
-
-# PlanningTools DB (SQL Server)
+AI_FOUNDRY_PROJECT_ENDPOINT=https://retail-analytics-resource.services.ai.azure.com/api/projects/retail-analytics
+MODEL_DEPLOYMENT_NAME=gpt-4.1
+STORE_DATA_AGENT_ID=asst_ATeySVzbqmq6uVcf0WsQyP9g
+REPLENISHMENT_AGENT_ID=asst_Re8Qe3CJA2HAIe0RFvYC8zGA
+AVAILABILITY_ANALYZER_AGENT_ID=asst_SflnQiJzisUyiK2rHcJyW2Lf
+MARGIN_IMPACT_AGENT_ID=asst_npywe7JJTnl0YW1pbqXEvge8
+SPACE_RANGING_AGENT_ID=asst_idaVHK1h7iYmU8pOf5PKUYbl
+CORE_ORDERING_AGENT_ID=asst_ACLAui1n3B37Cacos1cMPz7Z
 PLANNING_TOOLS_SQL_SERVER=cph-tst-sql01
-PLANNING_TOOLS_SQL_DATABASE=PlanningToolsDb
-# PLANNING_TOOLS_SQL_USERNAME=readonly_user
-# PLANNING_TOOLS_SQL_PASSWORD=readonly_password
+PLANNING_TOOLS_SQL_DATABASE=PlanningTools
 PLANNING_TOOLS_SQL_DRIVER=ODBC Driver 18 for SQL Server
-
-# Auth mode (optional)
-# AZURE_AUTH_USE_CLI=true
+IS_LOCAL=true

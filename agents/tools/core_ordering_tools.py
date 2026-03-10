@@ -5,8 +5,314 @@ These tools are intentionally read-only and designed for agent use.
 """
 import os
 import math
+import re
+import sqlite3
+import threading
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
+
+_SQLITE_CONN: Optional[sqlite3.Connection] = None
+_SQLITE_LOCK = threading.Lock()
+
+
+def _is_local_mode() -> bool:
+    val = os.environ.get("IS_LOCAL") or os.environ.get("isLocal") or "false"
+    return str(val).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _build_wk_cols(prefix: str, total_weeks: int = 53) -> List[str]:
+    return [f"{prefix}{i:02d}" for i in range(1, total_weeks + 1)]
+
+
+def _create_mock_tables(conn: sqlite3.Connection) -> None:
+    forecast_cols = ", ".join([f"{c} REAL DEFAULT 0" for c in _build_wk_cols("ForecastWk", 53)])
+    demand_cols = ", ".join([f"{c} REAL DEFAULT 0" for c in _build_wk_cols("DemandWk", 53)])
+    close_store_cols = ", ".join([f"{c} REAL DEFAULT 0" for c in _build_wk_cols("CloseStockWk", 53)])
+    close_wh_cols = ", ".join([f"{c} REAL DEFAULT 0" for c in _build_wk_cols("CloseStockWk", 53)])
+    conn.executescript(
+        f"""
+CREATE TABLE bicache.tbl_Item (
+    ItemKey INTEGER PRIMARY KEY,
+    ItemNumber TEXT NOT NULL,
+    ItemName TEXT
+);
+CREATE TABLE bicache.tbl_CentralWarehouse (
+    CentralWarehouseKey INTEGER PRIMARY KEY,
+    CentralWarehouseCode TEXT NOT NULL
+);
+CREATE TABLE model.tbl_StockWarehouseOnHand (
+    ItemKeyNew INTEGER,
+    CentralWarehouseKey INTEGER,
+    StockOnHand REAL,
+    QuantityOrdered REAL,
+    QuntityInPurchase REAL
+);
+CREATE TABLE model.tbl_StockStoreOnHand (
+    ItemKeyNew INTEGER,
+    StoreKey INTEGER,
+    StockOnHand REAL
+);
+CREATE TABLE model.tbl_StoreWarehouseRelationship (
+    StoreKey INTEGER,
+    CentralWarehouseKey INTEGER,
+    ValidFromDate TEXT,
+    ValidToDate TEXT
+);
+CREATE TABLE model.tbl_CoreAssortment (
+    ItemKey INTEGER,
+    CentralWarehouseKey INTEGER,
+    ReqFC INTEGER,
+    ReqPO INTEGER,
+    HasStock INTEGER,
+    HasPO INTEGER,
+    DataTimestamp TEXT
+);
+CREATE TABLE fpo.tbl_ForecastStoreSales (
+    ItemKey INTEGER,
+    CentralWarehouseKey INTEGER,
+    StoreKey INTEGER,
+    {forecast_cols}
+);
+CREATE TABLE fpo.tbl_CalcTimelineDay (
+    CalcWeekNo INTEGER,
+    YearAndWeek INTEGER
+);
+CREATE TABLE fpo.tbl_CalcTimelineWeek (
+    CalcWeekNo INTEGER,
+    YearAndWeek INTEGER
+);
+CREATE TABLE fpo.tbl_CalcStoreStock (
+    ItemKey INTEGER,
+    StoreKey INTEGER,
+    CentralWarehouseKey INTEGER,
+    {demand_cols},
+    {close_store_cols}
+);
+CREATE TABLE fpo.tbl_CalcWarehouseStock (
+    ItemKey INTEGER,
+    CentralWarehouseKey INTEGER,
+    {close_wh_cols}
+);
+CREATE TABLE fpo.tbl_ItemWarehouse (
+    ItemKey INTEGER,
+    CentralWarehouseKey INTEGER,
+    CentralWarehouseCode TEXT,
+    CategoryABC TEXT,
+    SafetyStockQty INTEGER
+);
+CREATE TABLE fpo.tbl_ItemWarehouseOrderQty (
+    ItemKey INTEGER,
+    CentralWarehouseKey INTEGER,
+    OrderQtyType TEXT,
+    AOQ INTEGER,
+    EOQ INTEGER,
+    LOQ INTEGER,
+    SOQ INTEGER
+);
+CREATE TABLE fpo.tbl_ItemWarehouseLeadtime (
+    ItemKey INTEGER,
+    CentralWarehouseKey INTEGER,
+    CalcWeekNo INTEGER,
+    LeadtimeDays INTEGER
+);
+CREATE TABLE fpo.tbl_ConfigStoreCover (
+    CategoryABC TEXT,
+    WeekOfYear INTEGER,
+    NoOfWeeksCoverStoreOrder INTEGER
+);
+CREATE TABLE fpo.tbl_ConfigWarehouseCover (
+    CategoryABC TEXT,
+    WeekOfYear INTEGER,
+    NoOfWeeksCoverWarehouseOrder INTEGER
+);
+CREATE TABLE fpo.tbl_ImportCoverConfig (
+    CentralWarehouseCode TEXT,
+    CategoryABC TEXT,
+    WeekOfYear INTEGER,
+    NoOfWeeksCoverWarehouseOrder INTEGER
+);
+CREATE TABLE am.tbl_JobControl (
+    JobName TEXT,
+    LastRunStart TEXT,
+    LastRunEnd TEXT,
+    LastRunErrorMessage TEXT
+);
+CREATE TABLE am.tbl_JobControlHistory (
+    JobName TEXT,
+    JobStart TEXT,
+    JobEnd TEXT,
+    JobErrorMessage TEXT
+);
+"""
+    )
+
+
+def _seed_mock_data(conn: sqlite3.Connection) -> None:
+    # One deterministic item across four warehouses for local testing.
+    item_key = 3000393
+    item_number = "3000393"
+    warehouses = [
+        (1, "DK01WH", 1488, 9904, 40),
+        (2, "ES01WH", 1416, 9812, 48),
+        (3, "GB01WH", 1368, 8516, 64),
+        (4, "CN01WH", 1200, 8189, 72),
+    ]
+    conn.execute(
+        "INSERT INTO bicache.tbl_Item(ItemKey, ItemNumber, ItemName) VALUES (?, ?, ?)",
+        (item_key, item_number, "Mock Core Item 3000393"),
+    )
+    for wh_key, wh_code, wh_on_hand, store_on_hand, store_key in warehouses:
+        conn.execute(
+            "INSERT INTO bicache.tbl_CentralWarehouse(CentralWarehouseKey, CentralWarehouseCode) VALUES (?, ?)",
+            (wh_key, wh_code),
+        )
+        conn.execute(
+            "INSERT INTO model.tbl_StockWarehouseOnHand(ItemKeyNew, CentralWarehouseKey, StockOnHand, QuantityOrdered, QuntityInPurchase) VALUES (?, ?, ?, ?, ?)",
+            (item_key, wh_key, float(wh_on_hand), 0.0, 0.0),
+        )
+        conn.execute(
+            "INSERT INTO model.tbl_StockStoreOnHand(ItemKeyNew, StoreKey, StockOnHand) VALUES (?, ?, ?)",
+            (item_key, store_key, float(store_on_hand)),
+        )
+        conn.execute(
+            "INSERT INTO model.tbl_StoreWarehouseRelationship(StoreKey, CentralWarehouseKey, ValidFromDate, ValidToDate) VALUES (?, ?, ?, ?)",
+            (store_key, wh_key, "2026-01-01", "2027-12-31"),
+        )
+        conn.execute(
+            "INSERT INTO model.tbl_CoreAssortment(ItemKey, CentralWarehouseKey, ReqFC, ReqPO, HasStock, HasPO, DataTimestamp) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (item_key, wh_key, 1, 1, 1, 0, "2026-03-10T00:00:00Z"),
+        )
+        conn.execute(
+            "INSERT INTO fpo.tbl_ItemWarehouse(ItemKey, CentralWarehouseKey, CentralWarehouseCode, CategoryABC, SafetyStockQty) VALUES (?, ?, ?, ?, ?)",
+            (item_key, wh_key, wh_code, "A", 96),
+        )
+        conn.execute(
+            "INSERT INTO fpo.tbl_ItemWarehouseOrderQty(ItemKey, CentralWarehouseKey, OrderQtyType, AOQ, EOQ, LOQ, SOQ) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (item_key, wh_key, "SOQ", 0, 0, 96, 24),
+        )
+        conn.execute(
+            "INSERT INTO fpo.tbl_ItemWarehouseLeadtime(ItemKey, CentralWarehouseKey, CalcWeekNo, LeadtimeDays) VALUES (?, ?, ?, ?)",
+            (item_key, wh_key, 1, 14),
+        )
+
+    iso_week = datetime.now().isocalendar()[1]
+    conn.execute(
+        "INSERT INTO fpo.tbl_ConfigStoreCover(CategoryABC, WeekOfYear, NoOfWeeksCoverStoreOrder) VALUES (?, ?, ?)",
+        ("A", iso_week, 2),
+    )
+    conn.execute(
+        "INSERT INTO fpo.tbl_ConfigWarehouseCover(CategoryABC, WeekOfYear, NoOfWeeksCoverWarehouseOrder) VALUES (?, ?, ?)",
+        ("A", iso_week, 4),
+    )
+    for _, wh_code, *_ in warehouses:
+        conn.execute(
+            "INSERT INTO fpo.tbl_ImportCoverConfig(CentralWarehouseCode, CategoryABC, WeekOfYear, NoOfWeeksCoverWarehouseOrder) VALUES (?, ?, ?, ?)",
+            (wh_code, "A", iso_week, 4),
+        )
+
+    for wk in range(1, 54):
+        year_week = 202600 + wk
+        conn.execute(
+            "INSERT INTO fpo.tbl_CalcTimelineWeek(CalcWeekNo, YearAndWeek) VALUES (?, ?)",
+            (wk, year_week),
+        )
+        conn.execute(
+            "INSERT INTO fpo.tbl_CalcTimelineDay(CalcWeekNo, YearAndWeek) VALUES (?, ?)",
+            (wk, year_week),
+        )
+
+    for wh_key, _, _, _, store_key in warehouses:
+        forecast_values = [max(0, 350 - (i * 4) + (wh_key * 3)) for i in range(53)]
+        demand_values = [max(0, v - 8) for v in forecast_values]
+        close_values = [max(0, 9000 - (i * 120) - (wh_key * 10)) for i in range(53)]
+        wh_close_values = [max(0, 1500 - (i * 24) - (wh_key * 2)) for i in range(53)]
+
+        forecast_cols = ", ".join(_build_wk_cols("ForecastWk", 53))
+        forecast_q = ", ".join(["?"] * 53)
+        conn.execute(
+            f"INSERT INTO fpo.tbl_ForecastStoreSales(ItemKey, CentralWarehouseKey, StoreKey, {forecast_cols}) VALUES (?, ?, ?, {forecast_q})",
+            [item_key, wh_key, store_key, *forecast_values],
+        )
+
+        demand_cols = ", ".join(_build_wk_cols("DemandWk", 53))
+        close_cols = ", ".join(_build_wk_cols("CloseStockWk", 53))
+        store_q = ", ".join(["?"] * 106)
+        conn.execute(
+            f"INSERT INTO fpo.tbl_CalcStoreStock(ItemKey, StoreKey, CentralWarehouseKey, {demand_cols}, {close_cols}) VALUES (?, ?, ?, {store_q})",
+            [item_key, store_key, wh_key, *demand_values, *close_values],
+        )
+
+        wh_close_cols = ", ".join(_build_wk_cols("CloseStockWk", 53))
+        wh_q = ", ".join(["?"] * 53)
+        conn.execute(
+            f"INSERT INTO fpo.tbl_CalcWarehouseStock(ItemKey, CentralWarehouseKey, {wh_close_cols}) VALUES (?, ?, {wh_q})",
+            [item_key, wh_key, *wh_close_values],
+        )
+
+    conn.execute(
+        "INSERT INTO am.tbl_JobControl(JobName, LastRunStart, LastRunEnd, LastRunErrorMessage) VALUES (?, ?, ?, ?)",
+        ("CoreOrderingMock", "2026-03-10T09:00:00Z", "2026-03-10T09:05:00Z", None),
+    )
+    conn.execute(
+        "INSERT INTO am.tbl_JobControlHistory(JobName, JobStart, JobEnd, JobErrorMessage) VALUES (?, ?, ?, ?)",
+        ("CoreOrderingMock", "2026-03-09T09:00:00Z", "2026-03-09T09:04:00Z", None),
+    )
+    conn.commit()
+
+
+def _get_sqlite_conn() -> sqlite3.Connection:
+    global _SQLITE_CONN
+    if _SQLITE_CONN is not None:
+        return _SQLITE_CONN
+    with _SQLITE_LOCK:
+        if _SQLITE_CONN is None:
+            conn = sqlite3.connect(":memory:", check_same_thread=False)
+            conn.row_factory = sqlite3.Row
+            conn.execute("ATTACH DATABASE ':memory:' AS model")
+            conn.execute("ATTACH DATABASE ':memory:' AS fpo")
+            conn.execute("ATTACH DATABASE ':memory:' AS bicache")
+            conn.execute("ATTACH DATABASE ':memory:' AS am")
+            _create_mock_tables(conn)
+            _seed_mock_data(conn)
+            _SQLITE_CONN = conn
+    return _SQLITE_CONN
+
+
+def _rewrite_sql_for_sqlite(sql: str) -> str:
+    rewritten = sql
+    top_match = re.search(r"select\s+top\s*\(\s*(\d+)\s*\)", rewritten, flags=re.IGNORECASE)
+    limit_value: Optional[str] = None
+    if top_match:
+        limit_value = top_match.group(1)
+        rewritten = re.sub(
+            r"select\s+top\s*\(\s*\d+\s*\)",
+            "SELECT",
+            rewritten,
+            count=1,
+            flags=re.IGNORECASE,
+        )
+    iso_week = datetime.now().isocalendar()[1]
+    rewritten = re.sub(
+        r"datepart\s*\(\s*iso_week\s*,\s*getdate\s*\(\s*\)\s*\)",
+        str(iso_week),
+        rewritten,
+        flags=re.IGNORECASE,
+    )
+    rewritten = re.sub(
+        r"datepart\s*\(\s*week\s*,\s*getdate\s*\(\s*\)\s*\)",
+        str(iso_week),
+        rewritten,
+        flags=re.IGNORECASE,
+    )
+    rewritten = re.sub(
+        r"getdate\s*\(\s*\)",
+        f"'{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}'",
+        rewritten,
+        flags=re.IGNORECASE,
+    )
+    if limit_value and not re.search(r"\blimit\s+\d+\b", rewritten, flags=re.IGNORECASE):
+        rewritten = rewritten.rstrip() + f"\nLIMIT {limit_value}"
+    return rewritten
 
 
 def _get_pyodbc():
@@ -69,7 +375,28 @@ def _query_sqlserver(sql: str, params: Optional[List[Any]] = None) -> List[Dict[
     return result
 
 
+def _query_sqlite(sql: str, params: Optional[List[Any]] = None) -> List[Dict[str, Any]]:
+    conn = _get_sqlite_conn()
+    query = _rewrite_sql_for_sqlite(sql)
+    cur = conn.cursor()
+    cur.execute(query, params or [])
+    if cur.description is None:
+        return []
+    rows = cur.fetchall()
+    result: List[Dict[str, Any]] = []
+    for r in rows:
+        if isinstance(r, sqlite3.Row):
+            result.append({k: r[k] for k in r.keys()})
+        else:
+            # Defensive fallback if row_factory gets changed.
+            cols = [c[0] for c in cur.description]
+            result.append({cols[i]: r[i] for i in range(len(cols))})
+    return result
+
+
 def _query(sql: str, params: Optional[List[Any]] = None) -> List[Dict[str, Any]]:
+    if _is_local_mode():
+        return _query_sqlite(sql, params)
     return _query_sqlserver(sql, params)
 
 

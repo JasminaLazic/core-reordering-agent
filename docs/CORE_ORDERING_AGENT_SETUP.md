@@ -34,6 +34,16 @@ Important:
 - Use a SQL user with **read-only permissions**.
 - Grant only required schemas/tables/functions.
 
+### Optional: local mock mode (offline)
+
+If you are not connected to on-prem SQL, set:
+
+- `IS_LOCAL=true`
+
+When enabled, tools run against an in-memory mock PlanningTools dataset with the same schema names (`model`, `fpo`, `bicache`, `am`) and deterministic seed data for local frontend/agent testing.
+
+When disabled (`IS_LOCAL=false`), tools use real SQL Server via `PLANNING_TOOLS_SQL_*`.
+
 ## 2) Install dependency
 
 If not already installed:
