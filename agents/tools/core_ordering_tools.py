@@ -5,314 +5,9 @@ These tools are intentionally read-only and designed for agent use.
 """
 import os
 import math
-import re
-import sqlite3
-import threading
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
+from decimal import Decimal
 from typing import Any, Dict, List, Optional, Tuple
-
-_SQLITE_CONN: Optional[sqlite3.Connection] = None
-_SQLITE_LOCK = threading.Lock()
-
-
-def _is_local_mode() -> bool:
-    val = os.environ.get("IS_LOCAL") or os.environ.get("isLocal") or "false"
-    return str(val).strip().lower() in {"1", "true", "yes", "y", "on"}
-
-
-def _build_wk_cols(prefix: str, total_weeks: int = 53) -> List[str]:
-    return [f"{prefix}{i:02d}" for i in range(1, total_weeks + 1)]
-
-
-def _create_mock_tables(conn: sqlite3.Connection) -> None:
-    forecast_cols = ", ".join([f"{c} REAL DEFAULT 0" for c in _build_wk_cols("ForecastWk", 53)])
-    demand_cols = ", ".join([f"{c} REAL DEFAULT 0" for c in _build_wk_cols("DemandWk", 53)])
-    close_store_cols = ", ".join([f"{c} REAL DEFAULT 0" for c in _build_wk_cols("CloseStockWk", 53)])
-    close_wh_cols = ", ".join([f"{c} REAL DEFAULT 0" for c in _build_wk_cols("CloseStockWk", 53)])
-    conn.executescript(
-        f"""
-CREATE TABLE bicache.tbl_Item (
-    ItemKey INTEGER PRIMARY KEY,
-    ItemNumber TEXT NOT NULL,
-    ItemName TEXT
-);
-CREATE TABLE bicache.tbl_CentralWarehouse (
-    CentralWarehouseKey INTEGER PRIMARY KEY,
-    CentralWarehouseCode TEXT NOT NULL
-);
-CREATE TABLE model.tbl_StockWarehouseOnHand (
-    ItemKeyNew INTEGER,
-    CentralWarehouseKey INTEGER,
-    StockOnHand REAL,
-    QuantityOrdered REAL,
-    QuntityInPurchase REAL
-);
-CREATE TABLE model.tbl_StockStoreOnHand (
-    ItemKeyNew INTEGER,
-    StoreKey INTEGER,
-    StockOnHand REAL
-);
-CREATE TABLE model.tbl_StoreWarehouseRelationship (
-    StoreKey INTEGER,
-    CentralWarehouseKey INTEGER,
-    ValidFromDate TEXT,
-    ValidToDate TEXT
-);
-CREATE TABLE model.tbl_CoreAssortment (
-    ItemKey INTEGER,
-    CentralWarehouseKey INTEGER,
-    ReqFC INTEGER,
-    ReqPO INTEGER,
-    HasStock INTEGER,
-    HasPO INTEGER,
-    DataTimestamp TEXT
-);
-CREATE TABLE fpo.tbl_ForecastStoreSales (
-    ItemKey INTEGER,
-    CentralWarehouseKey INTEGER,
-    StoreKey INTEGER,
-    {forecast_cols}
-);
-CREATE TABLE fpo.tbl_CalcTimelineDay (
-    CalcWeekNo INTEGER,
-    YearAndWeek INTEGER
-);
-CREATE TABLE fpo.tbl_CalcTimelineWeek (
-    CalcWeekNo INTEGER,
-    YearAndWeek INTEGER
-);
-CREATE TABLE fpo.tbl_CalcStoreStock (
-    ItemKey INTEGER,
-    StoreKey INTEGER,
-    CentralWarehouseKey INTEGER,
-    {demand_cols},
-    {close_store_cols}
-);
-CREATE TABLE fpo.tbl_CalcWarehouseStock (
-    ItemKey INTEGER,
-    CentralWarehouseKey INTEGER,
-    {close_wh_cols}
-);
-CREATE TABLE fpo.tbl_ItemWarehouse (
-    ItemKey INTEGER,
-    CentralWarehouseKey INTEGER,
-    CentralWarehouseCode TEXT,
-    CategoryABC TEXT,
-    SafetyStockQty INTEGER
-);
-CREATE TABLE fpo.tbl_ItemWarehouseOrderQty (
-    ItemKey INTEGER,
-    CentralWarehouseKey INTEGER,
-    OrderQtyType TEXT,
-    AOQ INTEGER,
-    EOQ INTEGER,
-    LOQ INTEGER,
-    SOQ INTEGER
-);
-CREATE TABLE fpo.tbl_ItemWarehouseLeadtime (
-    ItemKey INTEGER,
-    CentralWarehouseKey INTEGER,
-    CalcWeekNo INTEGER,
-    LeadtimeDays INTEGER
-);
-CREATE TABLE fpo.tbl_ConfigStoreCover (
-    CategoryABC TEXT,
-    WeekOfYear INTEGER,
-    NoOfWeeksCoverStoreOrder INTEGER
-);
-CREATE TABLE fpo.tbl_ConfigWarehouseCover (
-    CategoryABC TEXT,
-    WeekOfYear INTEGER,
-    NoOfWeeksCoverWarehouseOrder INTEGER
-);
-CREATE TABLE fpo.tbl_ImportCoverConfig (
-    CentralWarehouseCode TEXT,
-    CategoryABC TEXT,
-    WeekOfYear INTEGER,
-    NoOfWeeksCoverWarehouseOrder INTEGER
-);
-CREATE TABLE am.tbl_JobControl (
-    JobName TEXT,
-    LastRunStart TEXT,
-    LastRunEnd TEXT,
-    LastRunErrorMessage TEXT
-);
-CREATE TABLE am.tbl_JobControlHistory (
-    JobName TEXT,
-    JobStart TEXT,
-    JobEnd TEXT,
-    JobErrorMessage TEXT
-);
-"""
-    )
-
-
-def _seed_mock_data(conn: sqlite3.Connection) -> None:
-    # One deterministic item across four warehouses for local testing.
-    item_key = 3000393
-    item_number = "3000393"
-    warehouses = [
-        (1, "DK01WH", 1488, 9904, 40),
-        (2, "ES01WH", 1416, 9812, 48),
-        (3, "GB01WH", 1368, 8516, 64),
-        (4, "CN01WH", 1200, 8189, 72),
-    ]
-    conn.execute(
-        "INSERT INTO bicache.tbl_Item(ItemKey, ItemNumber, ItemName) VALUES (?, ?, ?)",
-        (item_key, item_number, "Mock Core Item 3000393"),
-    )
-    for wh_key, wh_code, wh_on_hand, store_on_hand, store_key in warehouses:
-        conn.execute(
-            "INSERT INTO bicache.tbl_CentralWarehouse(CentralWarehouseKey, CentralWarehouseCode) VALUES (?, ?)",
-            (wh_key, wh_code),
-        )
-        conn.execute(
-            "INSERT INTO model.tbl_StockWarehouseOnHand(ItemKeyNew, CentralWarehouseKey, StockOnHand, QuantityOrdered, QuntityInPurchase) VALUES (?, ?, ?, ?, ?)",
-            (item_key, wh_key, float(wh_on_hand), 0.0, 0.0),
-        )
-        conn.execute(
-            "INSERT INTO model.tbl_StockStoreOnHand(ItemKeyNew, StoreKey, StockOnHand) VALUES (?, ?, ?)",
-            (item_key, store_key, float(store_on_hand)),
-        )
-        conn.execute(
-            "INSERT INTO model.tbl_StoreWarehouseRelationship(StoreKey, CentralWarehouseKey, ValidFromDate, ValidToDate) VALUES (?, ?, ?, ?)",
-            (store_key, wh_key, "2026-01-01", "2027-12-31"),
-        )
-        conn.execute(
-            "INSERT INTO model.tbl_CoreAssortment(ItemKey, CentralWarehouseKey, ReqFC, ReqPO, HasStock, HasPO, DataTimestamp) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (item_key, wh_key, 1, 1, 1, 0, "2026-03-10T00:00:00Z"),
-        )
-        conn.execute(
-            "INSERT INTO fpo.tbl_ItemWarehouse(ItemKey, CentralWarehouseKey, CentralWarehouseCode, CategoryABC, SafetyStockQty) VALUES (?, ?, ?, ?, ?)",
-            (item_key, wh_key, wh_code, "A", 96),
-        )
-        conn.execute(
-            "INSERT INTO fpo.tbl_ItemWarehouseOrderQty(ItemKey, CentralWarehouseKey, OrderQtyType, AOQ, EOQ, LOQ, SOQ) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (item_key, wh_key, "SOQ", 0, 0, 96, 24),
-        )
-        conn.execute(
-            "INSERT INTO fpo.tbl_ItemWarehouseLeadtime(ItemKey, CentralWarehouseKey, CalcWeekNo, LeadtimeDays) VALUES (?, ?, ?, ?)",
-            (item_key, wh_key, 1, 14),
-        )
-
-    iso_week = datetime.now().isocalendar()[1]
-    conn.execute(
-        "INSERT INTO fpo.tbl_ConfigStoreCover(CategoryABC, WeekOfYear, NoOfWeeksCoverStoreOrder) VALUES (?, ?, ?)",
-        ("A", iso_week, 2),
-    )
-    conn.execute(
-        "INSERT INTO fpo.tbl_ConfigWarehouseCover(CategoryABC, WeekOfYear, NoOfWeeksCoverWarehouseOrder) VALUES (?, ?, ?)",
-        ("A", iso_week, 4),
-    )
-    for _, wh_code, *_ in warehouses:
-        conn.execute(
-            "INSERT INTO fpo.tbl_ImportCoverConfig(CentralWarehouseCode, CategoryABC, WeekOfYear, NoOfWeeksCoverWarehouseOrder) VALUES (?, ?, ?, ?)",
-            (wh_code, "A", iso_week, 4),
-        )
-
-    for wk in range(1, 54):
-        year_week = 202600 + wk
-        conn.execute(
-            "INSERT INTO fpo.tbl_CalcTimelineWeek(CalcWeekNo, YearAndWeek) VALUES (?, ?)",
-            (wk, year_week),
-        )
-        conn.execute(
-            "INSERT INTO fpo.tbl_CalcTimelineDay(CalcWeekNo, YearAndWeek) VALUES (?, ?)",
-            (wk, year_week),
-        )
-
-    for wh_key, _, _, _, store_key in warehouses:
-        forecast_values = [max(0, 350 - (i * 4) + (wh_key * 3)) for i in range(53)]
-        demand_values = [max(0, v - 8) for v in forecast_values]
-        close_values = [max(0, 9000 - (i * 120) - (wh_key * 10)) for i in range(53)]
-        wh_close_values = [max(0, 1500 - (i * 24) - (wh_key * 2)) for i in range(53)]
-
-        forecast_cols = ", ".join(_build_wk_cols("ForecastWk", 53))
-        forecast_q = ", ".join(["?"] * 53)
-        conn.execute(
-            f"INSERT INTO fpo.tbl_ForecastStoreSales(ItemKey, CentralWarehouseKey, StoreKey, {forecast_cols}) VALUES (?, ?, ?, {forecast_q})",
-            [item_key, wh_key, store_key, *forecast_values],
-        )
-
-        demand_cols = ", ".join(_build_wk_cols("DemandWk", 53))
-        close_cols = ", ".join(_build_wk_cols("CloseStockWk", 53))
-        store_q = ", ".join(["?"] * 106)
-        conn.execute(
-            f"INSERT INTO fpo.tbl_CalcStoreStock(ItemKey, StoreKey, CentralWarehouseKey, {demand_cols}, {close_cols}) VALUES (?, ?, ?, {store_q})",
-            [item_key, store_key, wh_key, *demand_values, *close_values],
-        )
-
-        wh_close_cols = ", ".join(_build_wk_cols("CloseStockWk", 53))
-        wh_q = ", ".join(["?"] * 53)
-        conn.execute(
-            f"INSERT INTO fpo.tbl_CalcWarehouseStock(ItemKey, CentralWarehouseKey, {wh_close_cols}) VALUES (?, ?, {wh_q})",
-            [item_key, wh_key, *wh_close_values],
-        )
-
-    conn.execute(
-        "INSERT INTO am.tbl_JobControl(JobName, LastRunStart, LastRunEnd, LastRunErrorMessage) VALUES (?, ?, ?, ?)",
-        ("CoreOrderingMock", "2026-03-10T09:00:00Z", "2026-03-10T09:05:00Z", None),
-    )
-    conn.execute(
-        "INSERT INTO am.tbl_JobControlHistory(JobName, JobStart, JobEnd, JobErrorMessage) VALUES (?, ?, ?, ?)",
-        ("CoreOrderingMock", "2026-03-09T09:00:00Z", "2026-03-09T09:04:00Z", None),
-    )
-    conn.commit()
-
-
-def _get_sqlite_conn() -> sqlite3.Connection:
-    global _SQLITE_CONN
-    if _SQLITE_CONN is not None:
-        return _SQLITE_CONN
-    with _SQLITE_LOCK:
-        if _SQLITE_CONN is None:
-            conn = sqlite3.connect(":memory:", check_same_thread=False)
-            conn.row_factory = sqlite3.Row
-            conn.execute("ATTACH DATABASE ':memory:' AS model")
-            conn.execute("ATTACH DATABASE ':memory:' AS fpo")
-            conn.execute("ATTACH DATABASE ':memory:' AS bicache")
-            conn.execute("ATTACH DATABASE ':memory:' AS am")
-            _create_mock_tables(conn)
-            _seed_mock_data(conn)
-            _SQLITE_CONN = conn
-    return _SQLITE_CONN
-
-
-def _rewrite_sql_for_sqlite(sql: str) -> str:
-    rewritten = sql
-    top_match = re.search(r"select\s+top\s*\(\s*(\d+)\s*\)", rewritten, flags=re.IGNORECASE)
-    limit_value: Optional[str] = None
-    if top_match:
-        limit_value = top_match.group(1)
-        rewritten = re.sub(
-            r"select\s+top\s*\(\s*\d+\s*\)",
-            "SELECT",
-            rewritten,
-            count=1,
-            flags=re.IGNORECASE,
-        )
-    iso_week = datetime.now().isocalendar()[1]
-    rewritten = re.sub(
-        r"datepart\s*\(\s*iso_week\s*,\s*getdate\s*\(\s*\)\s*\)",
-        str(iso_week),
-        rewritten,
-        flags=re.IGNORECASE,
-    )
-    rewritten = re.sub(
-        r"datepart\s*\(\s*week\s*,\s*getdate\s*\(\s*\)\s*\)",
-        str(iso_week),
-        rewritten,
-        flags=re.IGNORECASE,
-    )
-    rewritten = re.sub(
-        r"getdate\s*\(\s*\)",
-        f"'{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}'",
-        rewritten,
-        flags=re.IGNORECASE,
-    )
-    if limit_value and not re.search(r"\blimit\s+\d+\b", rewritten, flags=re.IGNORECASE):
-        rewritten = rewritten.rstrip() + f"\nLIMIT {limit_value}"
-    return rewritten
 
 
 def _get_pyodbc():
@@ -370,33 +65,24 @@ def _query_sqlserver(sql: str, params: Optional[List[Any]] = None) -> List[Dict[
     for r in rows:
         row = {}
         for i, c in enumerate(cols):
-            row[c] = r[i]
+            value = r[i]
+            # Normalize common SQL/Python types to JSON-safe values for tool transport.
+            if isinstance(value, (datetime, date)):
+                row[c] = value.isoformat()
+            elif isinstance(value, Decimal):
+                row[c] = float(value)
+            elif isinstance(value, bytes):
+                try:
+                    row[c] = value.decode("utf-8")
+                except Exception:
+                    row[c] = value.hex()
+            else:
+                row[c] = value
         result.append(row)
     return result
 
 
-def _query_sqlite(sql: str, params: Optional[List[Any]] = None) -> List[Dict[str, Any]]:
-    conn = _get_sqlite_conn()
-    query = _rewrite_sql_for_sqlite(sql)
-    cur = conn.cursor()
-    cur.execute(query, params or [])
-    if cur.description is None:
-        return []
-    rows = cur.fetchall()
-    result: List[Dict[str, Any]] = []
-    for r in rows:
-        if isinstance(r, sqlite3.Row):
-            result.append({k: r[k] for k in r.keys()})
-        else:
-            # Defensive fallback if row_factory gets changed.
-            cols = [c[0] for c in cur.description]
-            result.append({cols[i]: r[i] for i in range(len(cols))})
-    return result
-
-
 def _query(sql: str, params: Optional[List[Any]] = None) -> List[Dict[str, Any]]:
-    if _is_local_mode():
-        return _query_sqlite(sql, params)
     return _query_sqlserver(sql, params)
 
 
@@ -456,6 +142,32 @@ FROM {schema_table}
         "filters": {k: v for k, v in active_filters},
         "results": rows,
     }
+
+
+def get_item_master(
+    item_key: Optional[int] = None,
+    item_number: Optional[str] = None,
+    top_n: int = 100,
+) -> Dict[str, Any]:
+    """
+    Fetch item master data from bicache.tbl_Item.
+    Includes item dimensions, carton sizes, MOQ, pallet info, country of origin.
+    """
+    limit = _normalize_top_n(top_n, 500)
+    filters: List[str] = []
+    params: List[Any] = []
+    if item_key is not None:
+        filters.append("ItemKey = ?")
+        params.append(item_key)
+    if item_number is not None:
+        filters.append("ItemNumber = ?")
+        params.append(item_number)
+    where = ("WHERE " + " AND ".join(filters)) if filters else ""
+    sql = f"SELECT TOP ({limit}) * FROM bicache.tbl_Item {where}"
+    rows, err = _query_safe(sql, params if params else None)
+    if err:
+        return {"table": "bicache.tbl_Item", "count": 0, "error": err, "results": []}
+    return {"table": "bicache.tbl_Item", "count": len(rows), "results": rows}
 
 
 def get_stock_warehouse_on_hand(
@@ -1320,4 +1032,358 @@ def calculate_core_reorder_recommendations(
         "Agent must derive ordering logic from returned raw inputs."
     )
     return raw
+
+
+# ---------------------------------------------------------------------------
+# Optimized consolidated fetch — eliminates multiple LLM round-trips by
+# pre-fetching ALL data in Python and embedding it in the agent prompt.
+# ---------------------------------------------------------------------------
+
+def _compact_leadtime_rows(
+    rows: List[Dict[str, Any]], max_weeks: int = 20,
+) -> Dict[int, List[Dict[str, Any]]]:
+    """Group leadtime rows by warehouse, keeping only non-null weeks."""
+    by_wh: Dict[int, Dict[int, Dict[str, Any]]] = {}
+    for row in rows:
+        wh = row.get("CentralWarehouseKey")
+        if wh is None:
+            continue
+        if wh not in by_wh:
+            by_wh[wh] = {}
+        for i in range(1, max_weeks + 1):
+            dd = row.get(f"DeliveryDateWk{i:02d}") or row.get(f"DeliveryDate{i:02d}")
+            br = row.get(f"BlockReasonWk{i:02d}") or row.get(f"BlockReason{i:02d}")
+            rp = row.get(f"ReqPostDateWk{i:02d}") or row.get(f"ReqPostDate{i:02d}")
+            if dd is not None or br is not None:
+                entry: Dict[str, Any] = {"wk": i}
+                if dd is not None:
+                    entry["del"] = str(dd)[:10]
+                if br is not None:
+                    entry["blk"] = str(br)
+                if rp is not None:
+                    entry["rp"] = str(rp)[:10]
+                by_wh[wh][i] = entry
+    return {
+        wh: [v for _, v in sorted(wks.items())]
+        for wh, wks in by_wh.items()
+    }
+
+
+def _resolve_cover(
+    import_cov: List[Dict], wh_cov: List[Dict], wh_code: str, abc: str,
+) -> int:
+    for r in import_cov:
+        if (str(r.get("CentralWarehouseCode", "")).strip() == wh_code
+                and str(r.get("CategoryABC", "")).strip() == abc):
+            return int(r.get("WarehouseCover") or 4)
+    for r in wh_cov:
+        if str(r.get("CategoryABC", "")).strip() == abc:
+            return int(r.get("WarehouseCover") or 4)
+    return 4
+
+
+def _resolve_store_cover(store_cov: List[Dict], abc: str) -> int:
+    for r in store_cov:
+        if str(r.get("CategoryABC", "")).strip() == abc:
+            return int(r.get("StoreCover") or 2)
+    return 2
+
+
+def _trim_trailing_zeros(lst: List[float]) -> List[float]:
+    out = list(lst)
+    while out and out[-1] == 0:
+        out.pop()
+    return out
+
+
+def get_complete_ordering_context(
+    item_number: Optional[str] = None,
+    item_key: Optional[int] = None,
+    central_warehouse_code: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Single consolidated data fetch for reorder analysis.
+    Pre-aggregates store forecasts to warehouse level and compacts leadtime
+    so the entire dataset can be embedded in the agent prompt, eliminating
+    the need for 7+ separate tool-call round-trips.
+    """
+    errors: List[str] = []
+
+    # 1. Resolve item_key
+    if item_key is None and item_number:
+        rows, err = _query_safe(
+            "SELECT TOP 1 ItemKey FROM bicache.tbl_Item WHERE ItemNumber = ?",
+            [item_number],
+        )
+        if err:
+            return {"status": "error", "message": f"Failed to resolve item: {err}"}
+        if not rows:
+            return {"status": "no_item", "message": f"Item '{item_number}' not found"}
+        item_key = int(rows[0]["ItemKey"])
+
+    if item_key is None:
+        return {"status": "error", "message": "item_number or item_key required"}
+
+    # 2. Item master — named columns only
+    item_rows, err = _query_safe(
+        "SELECT ItemKey, ItemNumber, ItemName, "
+        "COALESCE(NumberOfUnitsPerParcelForStore, 0) AS StoreCartonSize, "
+        "COALESCE(NumberOfUnitsPerParcelWhenPurchase, 0) AS SupplierCartonSize, "
+        "COALESCE(NumberOfUnitsPerPallet, 0) AS PalletSize, "
+        "COALESCE(MOQ, 0) AS MOQ, CountryOriginCountryKey "
+        "FROM bicache.tbl_Item WHERE ItemKey = ?",
+        [item_key],
+    )
+    if err:
+        errors.append(f"item_master: {err}")
+    item = item_rows[0] if item_rows else {"ItemKey": item_key, "ItemNumber": item_number or "?"}
+
+    # 3. Warehouse config + stock + order qty in ONE join
+    wh_where = "WHERE iw.ItemKey = ?"
+    wh_params: List[Any] = [item_key]
+    if central_warehouse_code:
+        wh_where += " AND cw.CentralWarehouseCode = ?"
+        wh_params.append(central_warehouse_code)
+
+    warehouses, err = _query_safe(
+        "SELECT iw.CentralWarehouseKey, cw.CentralWarehouseCode, "
+        "iw.CategoryABC, iw.ReqPO, "
+        "COALESCE(iw.SafetyStockQty, 0) AS SafetyStockQty, "
+        "iw.ShipLT, iw.TotalLT, "
+        "COALESCE(s.StockOnHand, 0) AS WarehouseStockOnHand, "
+        "oq.OrderQtyType, "
+        "COALESCE(oq.AOQ, 0) AS AOQ, COALESCE(oq.EOQ, 0) AS EOQ, "
+        "COALESCE(oq.LOQ, 0) AS LOQ, COALESCE(oq.SOQ, 0) AS SOQ "
+        "FROM fpo.tbl_ItemWarehouse iw "
+        "JOIN bicache.tbl_CentralWarehouse cw "
+        "  ON cw.CentralWarehouseKey = iw.CentralWarehouseKey "
+        "LEFT JOIN model.tbl_StockWarehouseOnHand s "
+        "  ON s.ItemKeyNew = iw.ItemKey AND s.CentralWarehouseKey = iw.CentralWarehouseKey "
+        "LEFT JOIN fpo.tbl_ItemWarehouseOrderQty oq "
+        "  ON oq.ItemKey = iw.ItemKey AND oq.CentralWarehouseKey = iw.CentralWarehouseKey "
+        f"{wh_where}",
+        wh_params,
+    )
+    if err:
+        errors.append(f"warehouses: {err}")
+    if not warehouses:
+        return {
+            "status": "no_warehouses", "item": item, "errors": errors,
+            "message": f"No warehouse config for item_key {item_key}",
+        }
+
+    # 4. Forecast — pre-aggregated per warehouse (SUM across stores)
+    fc_cols = ", ".join(
+        f"SUM(COALESCE(ForecastWk{i:02d},0)) AS FW{i:02d}" for i in range(1, 53)
+    )
+    cq_cols = ", ".join(
+        f"SUM(COALESCE(CoverQtyWk{i:02d},0)) AS CQ{i:02d}" for i in range(1, 53)
+    )
+    forecast_rows, err = _query_safe(
+        f"SELECT CentralWarehouseKey, {fc_cols}, {cq_cols} "
+        "FROM fpo.tbl_ForecastStoreSales "
+        "WHERE ItemKey = ? "
+        "GROUP BY CentralWarehouseKey",
+        [item_key],
+    )
+    if err:
+        errors.append(f"forecast: {err}")
+
+    forecast_by_wh: Dict[int, Dict] = {}
+    for fr in (forecast_rows or []):
+        wk = fr["CentralWarehouseKey"]
+        forecast_by_wh[wk] = {
+            "forecast": [round(float(fr.get(f"FW{i:02d}") or 0), 1) for i in range(1, 53)],
+            "cover_qty": [round(float(fr.get(f"CQ{i:02d}") or 0), 1) for i in range(1, 53)],
+        }
+
+    # 5. Store stock grouped by warehouse
+    store_rows, err = _query_safe(
+        "SELECT swr.CentralWarehouseKey, ss.StoreKey, "
+        "COALESCE(ss.StockOnHand, 0) AS StoreStockOnHand "
+        "FROM model.tbl_StoreWarehouseRelationship swr "
+        "JOIN model.tbl_StockStoreOnHand ss "
+        "  ON ss.StoreKey = swr.StoreKey AND ss.ItemKeyNew = ? "
+        "ORDER BY swr.CentralWarehouseKey, ss.StoreKey",
+        [item_key],
+    )
+    if err:
+        errors.append(f"store_stock: {err}")
+
+    store_by_wh: Dict[int, Dict] = {}
+    for sr in (store_rows or []):
+        wk = sr["CentralWarehouseKey"]
+        if wk not in store_by_wh:
+            store_by_wh[wk] = {"total": 0.0, "stores": []}
+        stock = float(sr.get("StoreStockOnHand") or 0)
+        store_by_wh[wk]["total"] += stock
+        store_by_wh[wk]["stores"].append({"sk": sr["StoreKey"], "s": round(stock, 1)})
+
+    # 6. Leadtime — SELECT * then compact (column names vary across environments)
+    lt_raw, err = _query_safe(
+        "SELECT TOP 500 * FROM fpo.tbl_ItemWarehouseLeadtime WHERE ItemKey = ?",
+        [item_key],
+    )
+    if err:
+        errors.append(f"leadtime: {err}")
+    lt_by_wh = _compact_leadtime_rows(lt_raw or [], max_weeks=20)
+
+    # 7. Cover configs for current ISO week
+    store_cover, _ = _query_safe(
+        "SELECT CategoryABC, StoreCover "
+        "FROM fpo.tbl_ConfigStoreCover "
+        "WHERE WeekOfYear = DATEPART(ISO_WEEK, GETDATE())"
+    )
+    warehouse_cover, _ = _query_safe(
+        "SELECT CategoryABC, NoOfWeeksCoverWarehouseOrder AS WarehouseCover "
+        "FROM fpo.tbl_ConfigWarehouseCover "
+        "WHERE WeekOfYear = DATEPART(ISO_WEEK, GETDATE())"
+    )
+    import_cover, _ = _query_safe(
+        "SELECT CentralWarehouseCode, CategoryABC, "
+        "NoOfWeeksCoverWarehouseOrder AS WarehouseCover "
+        "FROM fpo.tbl_ImportCoverConfig "
+        "WHERE WeekOfYear = DATEPART(ISO_WEEK, GETDATE())"
+    )
+
+    # 8. Timeline
+    timeline, err = _query_safe(
+        "SELECT CalcWeekNo, YearAndWeek, WeekStartDate, WeekEndDate "
+        "FROM fpo.tbl_CalcTimelineWeek ORDER BY CalcWeekNo"
+    )
+    if err:
+        errors.append(f"timeline: {err}")
+
+    # --- Assemble compact result ---
+    warehouse_data = []
+    for w in warehouses:
+        wk = w["CentralWarehouseKey"]
+        wh_code = str(w.get("CentralWarehouseCode") or "")
+        abc = str(w.get("CategoryABC") or "")
+
+        wh_cover = _resolve_cover(import_cover or [], warehouse_cover or [], wh_code, abc)
+        st_cover = _resolve_store_cover(store_cover or [], abc)
+        fc = forecast_by_wh.get(wk, {"forecast": [], "cover_qty": []})
+        ss = store_by_wh.get(wk, {"total": 0.0, "stores": []})
+        lt = lt_by_wh.get(wk, [])
+
+        warehouse_data.append({
+            "wh_key": wk,
+            "wh_code": wh_code,
+            "abc": abc,
+            "req_po": w.get("ReqPO"),
+            "safety_stock": int(w.get("SafetyStockQty") or 0),
+            "ship_lt": w.get("ShipLT"),
+            "total_lt": w.get("TotalLT"),
+            "wh_stock": round(float(w.get("WarehouseStockOnHand") or 0), 1),
+            "oq_type": w.get("OrderQtyType"),
+            "aoq": int(w.get("AOQ") or 0),
+            "eoq": int(w.get("EOQ") or 0),
+            "loq": int(w.get("LOQ") or 0),
+            "soq": int(w.get("SOQ") or 0),
+            "cover_wk_store": st_cover,
+            "cover_wk_wh": wh_cover,
+            "forecast": _trim_trailing_zeros(fc.get("forecast", [])),
+            "cover_qty": _trim_trailing_zeros(fc.get("cover_qty", [])),
+            "store_stock": ss,
+            "leadtime": lt,
+        })
+
+    return {
+        "status": "ok",
+        "item": item,
+        "warehouses": warehouse_data,
+        "timeline": [
+            {
+                "wk": t.get("CalcWeekNo"),
+                "yw": t.get("YearAndWeek"),
+                "start": str(t.get("WeekStartDate", ""))[:10],
+                "end": str(t.get("WeekEndDate", ""))[:10],
+            }
+            for t in (timeline or [])
+        ],
+        "errors": errors if errors else None,
+    }
+
+
+def format_ordering_context_for_prompt(ctx: Dict[str, Any]) -> str:
+    """Render the consolidated context as compact text for prompt injection."""
+    item = ctx["item"]
+    parts: List[str] = []
+
+    parts.append(
+        f"=== ALL DATA FOR ITEM {item.get('ItemNumber','?')} "
+        f"(item_key={item.get('ItemKey')}) ==="
+    )
+    parts.append(
+        f"Item: name=\"{item.get('ItemName','')}\", "
+        f"store_carton={item.get('StoreCartonSize', 0)}, "
+        f"supplier_carton={item.get('SupplierCartonSize', 0)}, "
+        f"pallet={item.get('PalletSize', 0)}, "
+        f"moq={item.get('MOQ', 0)}, "
+        f"country_key={item.get('CountryOriginCountryKey', '?')}"
+    )
+
+    tl = ctx.get("timeline", [])
+    if tl:
+        parts.append("")
+        parts.append("Timeline (CalcWeekNo | YearWeek | Start-End):")
+        for t in tl:
+            parts.append(f"  {t['wk']:2d} | {t.get('yw','')} | {t['start']} to {t['end']}")
+
+    for w in ctx.get("warehouses", []):
+        parts.append("")
+        parts.append(f"--- WAREHOUSE {w['wh_code']} (key={w['wh_key']}) ---")
+        parts.append(
+            f"  ABC={w.get('abc','?')} ReqPO={w.get('req_po')} "
+            f"SafetyStock={w.get('safety_stock', 0)} "
+            f"ShipLT={w.get('ship_lt')}d TotalLT={w.get('total_lt')}d"
+        )
+        parts.append(f"  WarehouseStock={w.get('wh_stock', 0)}")
+        parts.append(
+            f"  OrderQty: type={w.get('oq_type')} "
+            f"AOQ={w.get('aoq',0)} EOQ={w.get('eoq',0)} "
+            f"LOQ={w.get('loq',0)} SOQ={w.get('soq',0)}"
+        )
+        parts.append(
+            f"  CoverWeeks: store={w.get('cover_wk_store', 2)} "
+            f"warehouse={w.get('cover_wk_wh', 4)}"
+        )
+
+        fc = w.get("forecast", [])
+        if fc:
+            parts.append(f"  Forecast[wk1..{len(fc)}]: {fc}")
+        cq = w.get("cover_qty", [])
+        if cq:
+            parts.append(f"  CoverQty[wk1..{len(cq)}]: {cq}")
+
+        ss = w.get("store_stock", {})
+        stores = ss.get("stores", [])
+        parts.append(
+            f"  StoreStock: total={round(ss.get('total', 0), 1)} ({len(stores)} stores)"
+        )
+        if stores:
+            detail = " ".join(f"{s['sk']}:{s['s']}" for s in stores)
+            parts.append(f"    [{detail}]")
+
+        lt = w.get("leadtime", [])
+        if lt:
+            lt_strs = []
+            for entry in lt:
+                wkn = entry.get("wk", "?")
+                if "blk" in entry:
+                    lt_strs.append(f"Wk{wkn}:BLOCKED({entry['blk']})")
+                else:
+                    d = entry.get("del", "-")
+                    r = entry.get("rp", "-")
+                    lt_strs.append(f"Wk{wkn}:{d}:{r}")
+            parts.append("  Leadtime (Wk:DeliveryDate:ReqPostDate):")
+            for j in range(0, len(lt_strs), 5):
+                parts.append(f"    {' | '.join(lt_strs[j:j+5])}")
+
+    if ctx.get("errors"):
+        parts.append("")
+        parts.append(f"Data warnings: {ctx['errors']}")
+
+    return "\n".join(parts)
 
