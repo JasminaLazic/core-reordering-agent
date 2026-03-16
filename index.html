@@ -167,7 +167,7 @@
 
       <div class="card">
         <label class="label" for="prompt">Prompt</label>
-        <textarea id="prompt">Give me CORE REORDERING for item number 3000393 for 53 calculation weeks and return table per warehouse with week, forecast, demand, quantity, order, whstock, ststock, downtime.</textarea>
+        <textarea id="prompt">Give me reorder recommendations for item number 3000393 across all warehouses. Include weekly projections with forecast, demand, quantity, order, whstock, ststock, and downtime.</textarea>
         <div class="row">
           <button id="run" class="primary">Run</button>
           <button id="toggleAdvanced" class="secondary">Advanced</button>
@@ -219,33 +219,72 @@
         if (core?.explanation && String(core.explanation).trim()) {
           return String(core.explanation).trim();
         }
-        if (!core || !Array.isArray(core.warehouse_views) || core.warehouse_views.length === 0) {
-          return "No structured weekly warehouse projection available.";
+        const recs = Array.isArray(core?.recommendations) ? core.recommendations : [];
+        const views = Array.isArray(core?.warehouse_views) ? core.warehouse_views : [];
+        if (recs.length > 0) {
+          const totalQty = recs.reduce((s, r) => s + (Number(r.order_qty) || 0), 0);
+          return `${recs.length} order recommendation${recs.length > 1 ? "s" : ""} totaling ${totalQty} units for item ${core.scope?.item_number ?? "-"}.`;
         }
-        const w = core.warehouse_views.length;
-        const weeks = core.scope?.horizon_weeks ?? core.warehouse_views[0]?.weekly_projection?.length ?? 0;
-        return `Generated ${weeks} weeks across ${w} warehouse${w > 1 ? "s" : ""} for item ${core.scope?.item_number ?? "-"}.`;
+        if (views.length > 0) {
+          const weeks = core.scope?.horizon_weeks ?? views[0]?.weekly_projection?.length ?? 0;
+          return `Generated ${weeks} weeks across ${views.length} warehouse${views.length > 1 ? "s" : ""} for item ${core.scope?.item_number ?? "-"}.`;
+        }
+        return "No structured recommendations available.";
+      }
+      function renderRecommendations(recs) {
+        if (!recs || !recs.length) return "";
+        const rows = recs.map((r) => `
+          <tr>
+            <td>${esc(r.warehouse_code || "-")}</td>
+            <td>${esc(r.rec_order_week ?? "-")}</td>
+            <td>${esc(r.delivery_date || "-")}</td>
+            <td><strong>${esc(fmt(r.order_qty))}</strong></td>
+            <td>${esc(r.weeks_cover ?? "-")}</td>
+            <td class="small">${esc(r.reasoning || "-")}</td>
+          </tr>
+        `).join("");
+        return `
+          <h3 style="margin:14px 0 8px;font-size:15px;">Recommendations</h3>
+          <div class="table-wrap">
+            <table>
+              <thead><tr>
+                <th>Warehouse</th><th>Order Week</th><th>Delivery Date</th>
+                <th>Order Qty</th><th>Weeks Cover</th><th>Reasoning</th>
+              </tr></thead>
+              <tbody>${rows}</tbody>
+            </table>
+          </div>
+        `;
       }
       function renderCoreTable(core, rawResponse) {
         const result = $("result");
         const views = Array.isArray(core?.warehouse_views) ? core.warehouse_views : [];
-        if (!views.length) {
+        const recs = Array.isArray(core?.recommendations) ? core.recommendations : [];
+        const explanation = summarize(core);
+
+        if (!views.length && !recs.length) {
           result.innerHTML = `
-            <div class="status warn">No warehouse views</div>
-            <div class="explain">${esc(summarize(core))}</div>
+            <div class="status warn">No structured data</div>
+            <div class="explain">${esc(explanation)}</div>
             <pre>${esc(rawResponse)}</pre>
           `;
           return;
         }
+
+        const recsHtml = renderRecommendations(recs);
         const options = views.map((v, i) => `<option value="${i}">${esc(v.warehouse_code || `W${i + 1}`)}</option>`).join("");
-        const explanation = summarize(core);
+        const warehouseSelector = views.length
+          ? `<div class="warehouse-bar">
+               <label class="small" for="warehouseSelect">Warehouse weekly view</label>
+               <select id="warehouseSelect">${options}</select>
+             </div>`
+          : "";
+
         result.innerHTML = `
           <div class="status ok">Structured response</div>
           <div class="explain">${esc(explanation)}</div>
-          <div class="warehouse-bar">
-            <label class="small" for="warehouseSelect">Warehouse</label>
-            <select id="warehouseSelect">${options}</select>
-          </div>
+          ${recsHtml}
+          ${warehouseSelector}
           <div id="tableHost"></div>
           <details style="margin-top:12px">
             <summary class="small">Raw response</summary>
@@ -253,13 +292,14 @@
           </details>
         `;
 
+        if (!views.length) return;
         const host = $("tableHost");
         const select = $("warehouseSelect");
         function renderWarehouse(index) {
           const view = views[index] || views[0];
           const rows = (view.weekly_projection || []).map((r) => `
             <tr>
-              <td>${esc(r.year_week || `W${String((r.week_index ?? 0) + 1).padStart(2, "0")}`)}</td>
+              <td>${esc(r.year_week || `W${String((r.week_index ?? 0)).padStart(2, "0")}`)}</td>
               <td>${esc(fmt(r.forecast))}</td>
               <td>${esc(fmt(r.demand))}</td>
               <td>${esc(fmt(r.quantity))}</td>
@@ -324,7 +364,7 @@
           const raw = typeof data?.response === "string" ? data.response : JSON.stringify(data, null, 2);
           const parsed = typeof data?.response === "string" ? toJsonOrNull(data.response) : null;
 
-          if (parsed && (Array.isArray(parsed.warehouse_views) || Array.isArray(parsed.weekly_projection))) {
+          if (parsed && (Array.isArray(parsed.warehouse_views) || Array.isArray(parsed.recommendations) || Array.isArray(parsed.weekly_projection))) {
             renderCoreTable(parsed, raw);
             return;
           }
