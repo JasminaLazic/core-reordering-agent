@@ -1,8 +1,16 @@
 """
-Tools for core re-ordering analysis against PlanningToolsDB.
+Core re-ordering tools for PlanningToolsDB.
 
-These tools are intentionally read-only and designed for agent use.
-Each function fetches a single table — the agent performs all reasoning.
+Agent tools (registered with the agent):
+  get_item_ordering_data  — one-shot batch fetch for a single item/warehouse
+  get_fpo_source_table    — whitelist-based lookup of any FPO raw source table
+
+Internal helpers (used only by the above, not exposed to the agent):
+  get_forecast_by_warehouse_week, get_demand_by_warehouse_week,
+  get_whstock_by_warehouse_week, get_ststock_by_warehouse_week
+
+API-only (used by api.py endpoints, not registered with the agent):
+  cursor_simulation, validate_proposal
 """
 import os
 import math
@@ -10,6 +18,10 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Any, Dict, List, Optional, Tuple
 
+
+# ---------------------------------------------------------------------------
+# Database connection
+# ---------------------------------------------------------------------------
 
 def _get_pyodbc():
     try:
@@ -23,18 +35,17 @@ def _get_pyodbc():
 
 
 def _build_connection_string() -> str:
-    server = os.environ.get("PLANNING_TOOLS_SQL_SERVER")
+    server   = os.environ.get("PLANNING_TOOLS_SQL_SERVER")
     database = os.environ.get("PLANNING_TOOLS_SQL_DATABASE", "PlanningTools")
     username = os.environ.get("PLANNING_TOOLS_SQL_USERNAME")
     password = os.environ.get("PLANNING_TOOLS_SQL_PASSWORD")
-    driver = os.environ.get("PLANNING_TOOLS_SQL_DRIVER", "ODBC Driver 18 for SQL Server")
+    driver   = os.environ.get("PLANNING_TOOLS_SQL_DRIVER", "ODBC Driver 18 for SQL Server")
 
     if not server:
         raise RuntimeError(
             "Missing PlanningToolsDB SQL config. Set "
             "PLANNING_TOOLS_SQL_SERVER (+ optional auth variables)."
         )
-
     if username and password:
         return (
             f"DRIVER={{{driver}}};"
@@ -42,7 +53,6 @@ def _build_connection_string() -> str:
             f"UID={username};PWD={password};"
             "Encrypt=yes;TrustServerCertificate=yes;"
         )
-
     return (
         f"DRIVER={{{driver}}};"
         f"SERVER={server};DATABASE={database};"
@@ -63,7 +73,7 @@ def _query_sqlserver(sql: str, params: Optional[List[Any]] = None) -> List[Dict[
         rows = cur.fetchall()
     result: List[Dict[str, Any]] = []
     for r in rows:
-        row = {}
+        row: Dict[str, Any] = {}
         for i, c in enumerate(cols):
             value = r[i]
             if isinstance(value, (datetime, date)):
@@ -85,187 +95,25 @@ def _query(sql: str, params: Optional[List[Any]] = None) -> List[Dict[str, Any]]
     return _query_sqlserver(sql, params)
 
 
-def _query_safe(sql: str, params: Optional[List[Any]] = None) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+def _query_safe(
+    sql: str, params: Optional[List[Any]] = None
+) -> Tuple[List[Dict[str, Any]], Optional[str]]:
     try:
         return _query(sql, params), None
     except Exception as e:
         return [], str(e)
 
 
-def _ensure_read_only_sql(sql: str) -> None:
-    normalized = sql.strip().lower()
-    if ";" in normalized:
-        raise ValueError("Only a single SELECT/CTE query without semicolons is allowed.")
-    if not (normalized.startswith("select") or normalized.startswith("with")):
-        raise ValueError("Only SELECT/CTE read-only queries are allowed.")
-    forbidden = [
-        " insert ", " update ", " delete ", " merge ", " alter ", " create ",
-        " drop ", " truncate ", " execute ", " exec ", " grant ", " revoke ",
-    ]
-    wrapped = f" {normalized} "
-    if any(tok in wrapped for tok in forbidden):
-        raise ValueError("Query contains non-read-only statements.")
-
-
 def _normalize_top_n(top_n: int, max_n: int = 500) -> int:
     return max(1, min(int(top_n), max_n))
 
 
-def _get_table_rows(
-    schema_table: str,
-    top_n: int = 100,
-    filters: Optional[List[Tuple[str, Any]]] = None,
-) -> Dict[str, Any]:
-    """Generic read-only table fetcher. Returns raw rows — agent does all reasoning."""
-    limit = _normalize_top_n(top_n, 500)
-    active_filters = [(col, val) for col, val in (filters or []) if val is not None]
-    where_clause = ""
-    params: List[Any] = []
-    if active_filters:
-        where_clause = "WHERE " + " AND ".join([f"{col} = ?" for col, _ in active_filters])
-        params = [v for _, v in active_filters]
-
-    sql = f"SELECT TOP ({limit}) * FROM {schema_table} {where_clause}"
-    rows = _query(sql, params if params else None)
-    return {
-        "table": schema_table,
-        "count": len(rows),
-        "filters": {k: v for k, v in active_filters},
-        "results": rows,
-    }
-
-
 # ---------------------------------------------------------------------------
-# Simple single-table fetch tools (no joins, no aggregations)
+# Timeline helper
 # ---------------------------------------------------------------------------
-
-def get_item_master(
-    item_key: Optional[int] = None,
-    item_number: Optional[str] = None,
-    top_n: int = 100,
-) -> Dict[str, Any]:
-    """
-    Fetch item master data from bicache.tbl_Item.
-    Includes item dimensions, carton sizes, MOQ, pallet info, country of origin.
-    """
-    limit = _normalize_top_n(top_n, 500)
-    filters: List[str] = []
-    params: List[Any] = []
-    if item_key is not None:
-        filters.append("ItemKey = ?")
-        params.append(item_key)
-    if item_number is not None:
-        filters.append("ItemNumber = ?")
-        params.append(item_number)
-    where = ("WHERE " + " AND ".join(filters)) if filters else ""
-    sql = f"SELECT TOP ({limit}) * FROM bicache.tbl_Item {where}"
-    rows, err = _query_safe(sql, params if params else None)
-    if err:
-        return {"table": "bicache.tbl_Item", "count": 0, "error": err, "results": []}
-    return {"table": "bicache.tbl_Item", "count": len(rows), "results": rows}
-
-
-def get_central_warehouse(
-    central_warehouse_key: Optional[int] = None,
-    central_warehouse_code: Optional[str] = None,
-    top_n: int = 100,
-) -> Dict[str, Any]:
-    """Fetch warehouse master from bicache.tbl_CentralWarehouse."""
-    return _get_table_rows(
-        "bicache.tbl_CentralWarehouse",
-        top_n=top_n,
-        filters=[
-            ("CentralWarehouseKey", central_warehouse_key),
-            ("CentralWarehouseCode", central_warehouse_code),
-        ],
-    )
-
-
-def get_stock_warehouse_on_hand(
-    item_key_new: Optional[int] = None,
-    central_warehouse_key: Optional[int] = None,
-    top_n: int = 100,
-) -> Dict[str, Any]:
-    """Fetch warehouse on-hand stock from model.tbl_StockWarehouseOnHand."""
-    return _get_table_rows(
-        "model.tbl_StockWarehouseOnHand",
-        top_n=top_n,
-        filters=[
-            ("ItemKeyNew", item_key_new),
-            ("CentralWarehouseKey", central_warehouse_key),
-        ],
-    )
-
-
-def get_stock_store_on_hand(
-    item_key_new: Optional[int] = None,
-    store_key: Optional[int] = None,
-    top_n: int = 100,
-) -> Dict[str, Any]:
-    """Fetch store on-hand stock from model.tbl_StockStoreOnHand."""
-    return _get_table_rows(
-        "model.tbl_StockStoreOnHand",
-        top_n=top_n,
-        filters=[
-            ("ItemKeyNew", item_key_new),
-            ("StoreKey", store_key),
-        ],
-    )
-
-
-def get_store_warehouse_relationship(
-    store_key: Optional[int] = None,
-    central_warehouse_key: Optional[int] = None,
-    top_n: int = 100,
-) -> Dict[str, Any]:
-    """Fetch store-to-warehouse mapping from model.tbl_StoreWarehouseRelationship."""
-    return _get_table_rows(
-        "model.tbl_StoreWarehouseRelationship",
-        top_n=top_n,
-        filters=[
-            ("StoreKey", store_key),
-            ("CentralWarehouseKey", central_warehouse_key),
-        ],
-    )
-
-
-def get_core_assortment(
-    item_key: Optional[int] = None,
-    central_warehouse_key: Optional[int] = None,
-    top_n: int = 100,
-) -> Dict[str, Any]:
-    """Fetch core assortment flags from model.tbl_CoreAssortment."""
-    return _get_table_rows(
-        "model.tbl_CoreAssortment",
-        top_n=top_n,
-        filters=[
-            ("ItemKey", item_key),
-            ("CentralWarehouseKey", central_warehouse_key),
-        ],
-    )
-
-
-def get_forecast_store_sales(
-    item_key: Optional[int] = None,
-    central_warehouse_key: Optional[int] = None,
-    top_n: int = 100,
-) -> Dict[str, Any]:
-    """
-    Fetch per-store weekly forecast from fpo.tbl_ForecastStoreSales.
-    Columns: ForecastWk01..ForecastWk53. Agent must aggregate across stores.
-    """
-    return _get_table_rows(
-        "fpo.tbl_ForecastStoreSales",
-        top_n=top_n,
-        filters=[
-            ("ItemKey", item_key),
-            ("CentralWarehouseKey", central_warehouse_key),
-        ],
-    )
-
 
 def _get_current_calc_week_no() -> int:
-    """Get CalcWeekNo for the week containing today. Default 1 if not found."""
+    """CalcWeekNo for the week containing today. Returns 1 if not found."""
     rows, err = _query_safe(
         "SELECT TOP 1 CalcWeekNo FROM fpo.tbl_CalcTimelineWeek "
         "WHERE CAST(GETDATE() AS DATE) BETWEEN WeekStartDate AND WeekEndDate"
@@ -275,8 +123,11 @@ def _get_current_calc_week_no() -> int:
     return int(rows[0]["CalcWeekNo"])
 
 
+# ---------------------------------------------------------------------------
+# CASE expression builders (used by the four internal weekly series fetchers)
+# ---------------------------------------------------------------------------
+
 def _build_forecast_case_expr() -> str:
-    """Build CASE mapping CalcWeekNo to SUM(ForecastWkNN)."""
     cases = [
         f"WHEN tw.CalcWeekNo = {i} THEN COALESCE(fss.ForecastWk{i:02d}, 0)"
         for i in range(1, 54)
@@ -285,7 +136,6 @@ def _build_forecast_case_expr() -> str:
 
 
 def _build_demand_case_expr() -> str:
-    """Build CASE mapping CalcWeekNo to SUM(StockInWkNN)."""
     cases = [
         f"WHEN tw.CalcWeekNo = {i} THEN COALESCE(css.StockInWk{i:02d}, 0)"
         for i in range(1, 54)
@@ -294,7 +144,6 @@ def _build_demand_case_expr() -> str:
 
 
 def _build_whstock_case_expr() -> str:
-    """Build CASE mapping CalcWeekNo to cws.CloseStockWkNN."""
     cases = [
         f"WHEN tw.CalcWeekNo = {i} THEN COALESCE(cws.CloseStockWk{i:02d}, 0)"
         for i in range(1, 54)
@@ -303,7 +152,6 @@ def _build_whstock_case_expr() -> str:
 
 
 def _build_ststock_case_expr() -> str:
-    """Build CASE mapping CalcWeekNo to SUM(css.CloseStockWkNN) across stores."""
     cases = [
         f"WHEN tw.CalcWeekNo = {i} THEN COALESCE(css.CloseStockWk{i:02d}, 0)"
         for i in range(1, 54)
@@ -311,29 +159,18 @@ def _build_ststock_case_expr() -> str:
     return "CASE " + " ".join(cases) + " ELSE 0 END"
 
 
+# ---------------------------------------------------------------------------
+# Internal weekly series fetchers (called by get_item_ordering_data /
+# cursor_simulation — not registered as agent tools)
+# ---------------------------------------------------------------------------
+
 def get_forecast_by_warehouse_week(
-    item_number: Optional[str] = None,
-    item_key: Optional[int] = None,
+    item_key: int,
     central_warehouse_code: Optional[str] = None,
     max_weeks: int = 53,
     start_from_current_week: bool = True,
 ) -> Dict[str, Any]:
-    """
-    Forecast by warehouse and week. Maps CalcWeekNo to ForecastWkNN, sums across stores.
-    When start_from_current_week=True (default), returns 53 weeks starting from the week containing today.
-    Uses: CalcStoreStock JOIN ForecastStoreSales on ItemKey+StoreKey, CASE for week mapping.
-    """
-    if item_key is None and item_number:
-        rows, err = _query_safe(
-            "SELECT TOP 1 ItemKey FROM bicache.tbl_Item WHERE ItemNumber = ?",
-            [item_number.strip()],
-        )
-        if err or not rows:
-            return {"status": "error", "message": f"Item lookup failed: {err or 'not found'}", "results": []}
-        item_key = int(rows[0]["ItemKey"])
-    if item_key is None:
-        return {"status": "error", "message": "item_number or item_key required", "results": []}
-
+    """Forecast per warehouse/week — SUM(ForecastWkNN) across stores."""
     wh_filter = ""
     params: List[Any] = [item_key]
     if central_warehouse_code:
@@ -343,14 +180,14 @@ def get_forecast_by_warehouse_week(
 
     case_expr = _build_forecast_case_expr()
     if start_from_current_week:
-        start_week = _get_current_calc_week_no()
         week_filter = "tw.CalcWeekNo >= ?"
         top_n = 53
-        params.append(start_week)
+        params.append(_get_current_calc_week_no())
     else:
         week_filter = "tw.CalcWeekNo BETWEEN 1 AND ?"
         top_n = min(max_weeks, 53)
         params.append(top_n)
+
     sql = f"""
 SELECT TOP ({top_n})
   css.CentralWarehouseKey,
@@ -373,44 +210,23 @@ INNER JOIN fpo.tbl_ForecastStoreSales fss
   ON fss.ItemKey = css.ItemKey AND fss.StoreKey = css.StoreKey
 JOIN bicache.tbl_CentralWarehouse cw ON cw.CentralWarehouseKey = css.CentralWarehouseKey
 WHERE {week_filter}
-GROUP BY css.CentralWarehouseKey, cw.CentralWarehouseCode, tw.CalcWeekNo, tw.YearAndWeek, tw.WeekStartDate, tw.WeekEndDate
+GROUP BY css.CentralWarehouseKey, cw.CentralWarehouseCode,
+         tw.CalcWeekNo, tw.YearAndWeek, tw.WeekStartDate, tw.WeekEndDate
 ORDER BY css.CentralWarehouseKey, tw.CalcWeekNo
 """
     rows, err = _query_safe(sql, params)
     if err:
         return {"status": "error", "message": str(err), "results": []}
-    return {
-        "status": "ok",
-        "item_key": item_key,
-        "table": "forecast_by_warehouse_week",
-        "count": len(rows or []),
-        "results": rows or [],
-    }
+    return {"status": "ok", "item_key": item_key, "count": len(rows or []), "results": rows or []}
 
 
 def get_demand_by_warehouse_week(
-    item_number: Optional[str] = None,
-    item_key: Optional[int] = None,
+    item_key: int,
     central_warehouse_code: Optional[str] = None,
     max_weeks: int = 53,
     start_from_current_week: bool = True,
 ) -> Dict[str, Any]:
-    """
-    Demand by warehouse and week. Maps CalcWeekNo to StockInWkNN, sums across stores.
-    When start_from_current_week=True (default), returns 53 weeks starting from the week containing today.
-    Uses: CalcStoreStock only (StockInWk01..53 = store pull from warehouse per week).
-    """
-    if item_key is None and item_number:
-        rows, err = _query_safe(
-            "SELECT TOP 1 ItemKey FROM bicache.tbl_Item WHERE ItemNumber = ?",
-            [item_number.strip()],
-        )
-        if err or not rows:
-            return {"status": "error", "message": f"Item lookup failed: {err or 'not found'}", "results": []}
-        item_key = int(rows[0]["ItemKey"])
-    if item_key is None:
-        return {"status": "error", "message": "item_number or item_key required", "results": []}
-
+    """Demand per warehouse/week — SUM(StockInWkNN) across stores."""
     wh_filter = ""
     params: List[Any] = [item_key]
     if central_warehouse_code:
@@ -420,14 +236,14 @@ def get_demand_by_warehouse_week(
 
     case_expr = _build_demand_case_expr()
     if start_from_current_week:
-        start_week = _get_current_calc_week_no()
         week_filter = "tw.CalcWeekNo >= ?"
         top_n = 53
-        params.append(start_week)
+        params.append(_get_current_calc_week_no())
     else:
         week_filter = "tw.CalcWeekNo BETWEEN 1 AND ?"
         top_n = min(max_weeks, 53)
         params.append(top_n)
+
     sql = f"""
 SELECT TOP ({top_n})
   css.CentralWarehouseKey,
@@ -448,42 +264,22 @@ INNER JOIN fpo.tbl_CalcStoreStock css
   ON css.ItemKey = ? AND css.CentralWarehouseKey = wh.CentralWarehouseKey
 JOIN bicache.tbl_CentralWarehouse cw ON cw.CentralWarehouseKey = css.CentralWarehouseKey
 WHERE {week_filter}
-GROUP BY css.CentralWarehouseKey, cw.CentralWarehouseCode, tw.CalcWeekNo, tw.YearAndWeek, tw.WeekStartDate, tw.WeekEndDate
+GROUP BY css.CentralWarehouseKey, cw.CentralWarehouseCode,
+         tw.CalcWeekNo, tw.YearAndWeek, tw.WeekStartDate, tw.WeekEndDate
 ORDER BY css.CentralWarehouseKey, tw.CalcWeekNo
 """
     rows, err = _query_safe(sql, params)
     if err:
         return {"status": "error", "message": str(err), "results": []}
-    return {
-        "status": "ok",
-        "item_key": item_key,
-        "table": "demand_by_warehouse_week",
-        "count": len(rows or []),
-        "results": rows or [],
-    }
+    return {"status": "ok", "item_key": item_key, "count": len(rows or []), "results": rows or []}
 
 
 def get_whstock_by_warehouse_week(
-    item_number: Optional[str] = None,
-    item_key: Optional[int] = None,
+    item_key: int,
     central_warehouse_code: Optional[str] = None,
     start_from_current_week: bool = True,
 ) -> Dict[str, Any]:
-    """
-    WhStock by warehouse and week. Maps CalcWeekNo to CloseStockWkNN from CalcWarehouseStock.
-    Source: cws.CloseStockWk01..53 per CalcWeekNo.
-    """
-    if item_key is None and item_number:
-        rows, err = _query_safe(
-            "SELECT TOP 1 ItemKey FROM bicache.tbl_Item WHERE ItemNumber = ?",
-            [item_number.strip()],
-        )
-        if err or not rows:
-            return {"status": "error", "message": f"Item lookup failed: {err or 'not found'}", "results": []}
-        item_key = int(rows[0]["ItemKey"])
-    if item_key is None:
-        return {"status": "error", "message": "item_number or item_key required", "results": []}
-
+    """Warehouse closing stock per week — CloseStockWkNN from CalcWarehouseStock."""
     wh_filter = ""
     params: List[Any] = [item_key]
     if central_warehouse_code:
@@ -493,35 +289,10 @@ def get_whstock_by_warehouse_week(
 
     case_expr = _build_whstock_case_expr()
     if start_from_current_week:
-        start_week = _get_current_calc_week_no()
         week_filter = "tw.CalcWeekNo >= ?"
-        params.append(start_week)
+        params.append(_get_current_calc_week_no())
     else:
         week_filter = "tw.CalcWeekNo BETWEEN 1 AND 53"
-    sql = f"""
-SELECT TOP 53
-  cws.CentralWarehouseKey,
-  cw.CentralWarehouseCode,
-  tw.CalcWeekNo,
-  tw.YearAndWeek,
-  tw.WeekStartDate,
-  tw.WeekEndDate,
-  {case_expr} AS WhStock
-FROM fpo.tbl_CalcTimelineWeek tw
-INNER JOIN fpo.tbl_CalcWarehouseStock cws ON cws.ItemKey = ?
-JOIN bicache.tbl_CentralWarehouse cw ON cw.CentralWarehouseKey = cws.CentralWarehouseKey {wh_filter.replace("cw.CentralWarehouseCode", "cws.CentralWarehouseKey").replace("cw.", "cws.") if central_warehouse_code else ""}
-WHERE {week_filter}
-ORDER BY cws.CentralWarehouseKey, tw.CalcWeekNo
-"""
-    # Fix: wh_filter uses cw, but we join cws. Need to filter by CentralWarehouseKey.
-    # Simpler: use the same CROSS JOIN pattern as forecast
-    wh_sub = "AND cw.CentralWarehouseCode = ?" if central_warehouse_code else ""
-    params_fixed: List[Any] = [item_key]
-    if central_warehouse_code:
-        params_fixed.append(central_warehouse_code.strip())
-    params_fixed.append(item_key)
-    if start_from_current_week:
-        params_fixed.append(_get_current_calc_week_no())
 
     sql = f"""
 SELECT TOP 53
@@ -539,7 +310,8 @@ CROSS JOIN (
   JOIN bicache.tbl_CentralWarehouse cw ON cw.CentralWarehouseKey = cws.CentralWarehouseKey
   WHERE cws.ItemKey = ? {wh_filter}
 ) wh
-INNER JOIN fpo.tbl_CalcWarehouseStock cws ON cws.ItemKey = ? AND cws.CentralWarehouseKey = wh.CentralWarehouseKey
+INNER JOIN fpo.tbl_CalcWarehouseStock cws
+  ON cws.ItemKey = ? AND cws.CentralWarehouseKey = wh.CentralWarehouseKey
 JOIN bicache.tbl_CentralWarehouse cw ON cw.CentralWarehouseKey = cws.CentralWarehouseKey
 WHERE {week_filter}
 ORDER BY cws.CentralWarehouseKey, tw.CalcWeekNo
@@ -547,36 +319,15 @@ ORDER BY cws.CentralWarehouseKey, tw.CalcWeekNo
     rows, err = _query_safe(sql, params)
     if err:
         return {"status": "error", "message": str(err), "results": []}
-    return {
-        "status": "ok",
-        "item_key": item_key,
-        "table": "whstock_by_warehouse_week",
-        "count": len(rows or []),
-        "results": rows or [],
-    }
+    return {"status": "ok", "item_key": item_key, "count": len(rows or []), "results": rows or []}
 
 
 def get_ststock_by_warehouse_week(
-    item_number: Optional[str] = None,
-    item_key: Optional[int] = None,
+    item_key: int,
     central_warehouse_code: Optional[str] = None,
     start_from_current_week: bool = True,
 ) -> Dict[str, Any]:
-    """
-    StStock by warehouse and week. Maps CalcWeekNo to SUM(CloseStockWkNN) across stores.
-    Source: CalcStoreStock.CloseStockWk01..53, summed per warehouse.
-    """
-    if item_key is None and item_number:
-        rows, err = _query_safe(
-            "SELECT TOP 1 ItemKey FROM bicache.tbl_Item WHERE ItemNumber = ?",
-            [item_number.strip()],
-        )
-        if err or not rows:
-            return {"status": "error", "message": f"Item lookup failed: {err or 'not found'}", "results": []}
-        item_key = int(rows[0]["ItemKey"])
-    if item_key is None:
-        return {"status": "error", "message": "item_number or item_key required", "results": []}
-
+    """Store closing stock per warehouse/week — SUM(CloseStockWkNN) across stores."""
     wh_filter = ""
     params: List[Any] = [item_key]
     if central_warehouse_code:
@@ -586,11 +337,11 @@ def get_ststock_by_warehouse_week(
 
     case_expr = _build_ststock_case_expr()
     if start_from_current_week:
-        start_week = _get_current_calc_week_no()
         week_filter = "tw.CalcWeekNo >= ?"
-        params.append(start_week)
+        params.append(_get_current_calc_week_no())
     else:
         week_filter = "tw.CalcWeekNo BETWEEN 1 AND 53"
+
     sql = f"""
 SELECT TOP 53
   css.CentralWarehouseKey,
@@ -611,251 +362,36 @@ INNER JOIN fpo.tbl_CalcStoreStock css
   ON css.ItemKey = ? AND css.CentralWarehouseKey = wh.CentralWarehouseKey
 JOIN bicache.tbl_CentralWarehouse cw ON cw.CentralWarehouseKey = css.CentralWarehouseKey
 WHERE {week_filter}
-GROUP BY css.CentralWarehouseKey, cw.CentralWarehouseCode, tw.CalcWeekNo, tw.YearAndWeek, tw.WeekStartDate, tw.WeekEndDate
+GROUP BY css.CentralWarehouseKey, cw.CentralWarehouseCode,
+         tw.CalcWeekNo, tw.YearAndWeek, tw.WeekStartDate, tw.WeekEndDate
 ORDER BY css.CentralWarehouseKey, tw.CalcWeekNo
 """
     rows, err = _query_safe(sql, params)
     if err:
         return {"status": "error", "message": str(err), "results": []}
-    return {
-        "status": "ok",
-        "item_key": item_key,
-        "table": "ststock_by_warehouse_week",
-        "count": len(rows or []),
-        "results": rows or [],
-    }
+    return {"status": "ok", "item_key": item_key, "count": len(rows or []), "results": rows or []}
 
 
-def get_calc_timeline_day(
-    calc_week_no: Optional[int] = None,
-    year_and_week: Optional[int] = None,
-    top_n: int = 100,
-) -> Dict[str, Any]:
-    """Fetch daily calculation timeline from fpo.tbl_CalcTimelineDay."""
-    return _get_table_rows(
-        "fpo.tbl_CalcTimelineDay",
-        top_n=top_n,
-        filters=[
-            ("CalcWeekNo", calc_week_no),
-            ("YearAndWeek", year_and_week),
-        ],
-    )
-
-
-def get_calc_timeline_week(
-    calc_week_no: Optional[int] = None,
-    year_and_week: Optional[int] = None,
-    top_n: int = 100,
-) -> Dict[str, Any]:
-    """Fetch weekly calculation timeline from fpo.tbl_CalcTimelineWeek."""
-    return _get_table_rows(
-        "fpo.tbl_CalcTimelineWeek",
-        top_n=top_n,
-        filters=[
-            ("CalcWeekNo", calc_week_no),
-            ("YearAndWeek", year_and_week),
-        ],
-    )
-
-
-def get_calc_store_stock(
-    item_key: Optional[int] = None,
-    store_key: Optional[int] = None,
-    central_warehouse_key: Optional[int] = None,
-    top_n: int = 100,
-) -> Dict[str, Any]:
-    """
-    Fetch store-level calc state from fpo.tbl_CalcStoreStock.
-    Columns include StockInWk01..53 (demand), CloseStockWk00..53 (closing stock).
-    """
-    return _get_table_rows(
-        "fpo.tbl_CalcStoreStock",
-        top_n=top_n,
-        filters=[
-            ("ItemKey", item_key),
-            ("StoreKey", store_key),
-            ("CentralWarehouseKey", central_warehouse_key),
-        ],
-    )
-
-
-def get_calc_warehouse_stock(
-    item_key: Optional[int] = None,
-    central_warehouse_key: Optional[int] = None,
-    top_n: int = 100,
-) -> Dict[str, Any]:
-    """
-    Fetch warehouse-level calc state from fpo.tbl_CalcWarehouseStock.
-    Columns include CloseStockWk00..53 (warehouse closing stock per week).
-    """
-    return _get_table_rows(
-        "fpo.tbl_CalcWarehouseStock",
-        top_n=top_n,
-        filters=[
-            ("ItemKey", item_key),
-            ("CentralWarehouseKey", central_warehouse_key),
-        ],
-    )
-
-
-def get_item_warehouse(
-    item_key: Optional[int] = None,
-    central_warehouse_key: Optional[int] = None,
-    central_warehouse_code: Optional[str] = None,
-    top_n: int = 100,
-) -> Dict[str, Any]:
-    """
-    Fetch item/warehouse config from fpo.tbl_ItemWarehouse.
-    Includes CategoryABC, ReqPO, SafetyStockQty, ShipLT, TotalLT.
-    """
-    return _get_table_rows(
-        "fpo.tbl_ItemWarehouse",
-        top_n=top_n,
-        filters=[
-            ("ItemKey", item_key),
-            ("CentralWarehouseKey", central_warehouse_key),
-            ("CentralWarehouseCode", central_warehouse_code),
-        ],
-    )
-
-
-def get_item_warehouse_order_qty(
-    item_key: Optional[int] = None,
-    central_warehouse_key: Optional[int] = None,
-    top_n: int = 100,
-) -> Dict[str, Any]:
-    """Fetch order quantity controls from fpo.tbl_ItemWarehouseOrderQty (AOQ, EOQ, LOQ, SOQ)."""
-    return _get_table_rows(
-        "fpo.tbl_ItemWarehouseOrderQty",
-        top_n=top_n,
-        filters=[
-            ("ItemKey", item_key),
-            ("CentralWarehouseKey", central_warehouse_key),
-        ],
-    )
-
-
-def get_warehouse_order(
-    item_key: Optional[int] = None,
-    central_warehouse_key: Optional[int] = None,
-    top_n: int = 200,
-) -> Dict[str, Any]:
-    """Fetch existing warehouse orders from fpo.tbl_WarehouseOrder."""
-    return _get_table_rows(
-        "fpo.tbl_WarehouseOrder",
-        top_n=top_n,
-        filters=[
-            ("ItemKey", item_key),
-            ("CentralWarehouseKey", central_warehouse_key),
-        ],
-    )
-
-
-def get_item_warehouse_leadtime(
-    item_key: Optional[int] = None,
-    central_warehouse_key: Optional[int] = None,
-    calc_week_no: Optional[int] = None,
-    top_n: int = 100,
-) -> Dict[str, Any]:
-    """
-    Fetch delivery/req-post calendar from fpo.tbl_ItemWarehouseLeadtime.
-    Columns include DeliveryDateWk01..20, BlockReasonWk01..20, ReqPostDateWk01..20.
-    """
-    return _get_table_rows(
-        "fpo.tbl_ItemWarehouseLeadtime",
-        top_n=top_n,
-        filters=[
-            ("ItemKey", item_key),
-            ("CentralWarehouseKey", central_warehouse_key),
-            ("CalcWeekNo", calc_week_no),
-        ],
-    )
-
-
-
-def get_config_store_cover(
-    category_abc: Optional[str] = None,
-    week_of_year: Optional[int] = None,
-    top_n: int = 100,
-) -> Dict[str, Any]:
-    """Fetch store cover config from fpo.tbl_ConfigStoreCover."""
-    return _get_table_rows(
-        "fpo.tbl_ConfigStoreCover",
-        top_n=top_n,
-        filters=[
-            ("CategoryABC", category_abc),
-            ("WeekOfYear", week_of_year),
-        ],
-    )
-
-
-def get_config_warehouse_cover(
-    category_abc: Optional[str] = None,
-    week_of_year: Optional[int] = None,
-    top_n: int = 100,
-) -> Dict[str, Any]:
-    """Fetch warehouse cover config from fpo.tbl_ConfigWarehouseCover."""
-    return _get_table_rows(
-        "fpo.tbl_ConfigWarehouseCover",
-        top_n=top_n,
-        filters=[
-            ("CategoryABC", category_abc),
-            ("WeekOfYear", week_of_year),
-        ],
-    )
-
-
-def get_import_cover_config(
-    central_warehouse_code: Optional[str] = None,
-    category_abc: Optional[str] = None,
-    week_of_year: Optional[int] = None,
-    top_n: int = 100,
-) -> Dict[str, Any]:
-    """Fetch import cover config from fpo.tbl_ImportCoverConfig."""
-    return _get_table_rows(
-        "fpo.tbl_ImportCoverConfig",
-        top_n=top_n,
-        filters=[
-            ("CentralWarehouseCode", central_warehouse_code),
-            ("CategoryABC", category_abc),
-            ("WeekOfYear", week_of_year),
-        ],
-    )
-
-
-def get_job_control(
-    job_name: Optional[str] = None,
-    top_n: int = 100,
-) -> Dict[str, Any]:
-    """Fetch job control state from am.tbl_JobControl."""
-    return _get_table_rows(
-        "am.tbl_JobControl",
-        top_n=top_n,
-        filters=[("JobName", job_name)],
-    )
-
-
-def get_job_control_history(
-    job_name: Optional[str] = None,
-    top_n: int = 100,
-) -> Dict[str, Any]:
-    """Fetch job run history from am.tbl_JobControlHistory."""
-    return _get_table_rows(
-        "am.tbl_JobControlHistory",
-        top_n=top_n,
-        filters=[("JobName", job_name)],
-    )
-
+# ---------------------------------------------------------------------------
+# AGENT TOOL 1: get_item_ordering_data
+# ---------------------------------------------------------------------------
 
 def get_item_ordering_data(
     item_number: str,
     central_warehouse_code: Optional[str] = None,
-    max_weeks: int = 53,
+    include_all_warehouses: bool = False,
 ) -> Dict[str, Any]:
     """
-    Fetch ALL raw tables for an item in ONE call. Use this first for core reordering
-    to minimize tool calls and avoid rate limits. Returns simple SELECTs only — no joins.
-    You must aggregate and reason from the raw rows yourself.
+    Fetch ALL data needed for a core reorder recommendation in ONE call.
+
+    Returns item master/config, demand, forecast, warehouse/store closing stock,
+    cover configs, leadtime calendar, and a 53-week timeline starting from today.
+    Warehouse orders (tbl_WarehouseOrder) are intentionally excluded — this is the
+    recommendation (no-orders) scenario.
+
+    include_all_warehouses=True: also return a multi_warehouse_summary and warehouse
+    master for every warehouse that carries the item (ignored when central_warehouse_code
+    is supplied).
     """
     if not (item_number or "").strip():
         return {"status": "error", "message": "item_number required", "tables": {}}
@@ -871,6 +407,8 @@ def get_item_ordering_data(
     item_key = int(rows[0]["ItemKey"])
 
     tables: Dict[str, List[Dict[str, Any]]] = {}
+
+    # Resolve warehouse key
     wh_key: Optional[int] = None
     if central_warehouse_code:
         wh_rows, _ = _query_safe(
@@ -890,7 +428,23 @@ def get_item_ordering_data(
         [item_key],
     )
 
-    # ItemWarehouse
+    # Warehouse master
+    if include_all_warehouses and not central_warehouse_code:
+        tables["bicache_tbl_CentralWarehouse"], _ = _query_safe(
+            "SELECT DISTINCT cw.CentralWarehouseKey, cw.CentralWarehouseCode, cw.CentralWarehouseName "
+            "FROM bicache.tbl_CentralWarehouse cw "
+            "INNER JOIN fpo.tbl_ItemWarehouse iw ON iw.CentralWarehouseKey = cw.CentralWarehouseKey "
+            "WHERE iw.ItemKey = ?",
+            [item_key],
+        )
+    elif wh_key is not None:
+        tables["bicache_tbl_CentralWarehouse"], _ = _query_safe(
+            "SELECT CentralWarehouseKey, CentralWarehouseCode, CentralWarehouseName "
+            "FROM bicache.tbl_CentralWarehouse WHERE CentralWarehouseKey = ?",
+            [wh_key],
+        )
+
+    # ItemWarehouse config (ABC class, SafetyStockQty, ReqPO, ShipLT, TotalLT)
     if wh_key is not None:
         tables["fpo_tbl_ItemWarehouse"], _ = _query_safe(
             "SELECT * FROM fpo.tbl_ItemWarehouse WHERE ItemKey = ? AND CentralWarehouseKey = ?",
@@ -898,65 +452,70 @@ def get_item_ordering_data(
         )
     else:
         tables["fpo_tbl_ItemWarehouse"], _ = _query_safe(
-            "SELECT * FROM fpo.tbl_ItemWarehouse WHERE ItemKey = ?",
-            [item_key],
+            "SELECT * FROM fpo.tbl_ItemWarehouse WHERE ItemKey = ?", [item_key],
         )
 
-    # ItemWarehouseOrderQty
-    tables["fpo_tbl_ItemWarehouseOrderQty"], _ = _query_safe(
-        "SELECT * FROM fpo.tbl_ItemWarehouseOrderQty WHERE ItemKey = ?",
-        [item_key],
-    )
+    # ItemWarehouseOrderQty (AOQ, EOQ, LOQ, SOQ, carton/pallet sizes)
+    if wh_key is not None:
+        tables["fpo_tbl_ItemWarehouseOrderQty"], _ = _query_safe(
+            "SELECT * FROM fpo.tbl_ItemWarehouseOrderQty WHERE ItemKey = ? AND CentralWarehouseKey = ?",
+            [item_key, wh_key],
+        )
+    else:
+        tables["fpo_tbl_ItemWarehouseOrderQty"], _ = _query_safe(
+            "SELECT * FROM fpo.tbl_ItemWarehouseOrderQty WHERE ItemKey = ?", [item_key],
+        )
 
-    # CalcWarehouseStock — filter by warehouse when provided for correct whstock
+    # CalcWarehouseStock — opening stock (CloseStockWk00) only
     cws_params: List[Any] = [item_key]
     cws_wh_filter = ""
     if wh_key is not None:
         cws_wh_filter = " AND CentralWarehouseKey = ?"
         cws_params.append(wh_key)
     tables["fpo_tbl_CalcWarehouseStock"], _ = _query_safe(
-        f"SELECT ItemKey, CentralWarehouseKey, CloseStockWk00 FROM fpo.tbl_CalcWarehouseStock WHERE ItemKey = ?{cws_wh_filter}",
+        f"SELECT ItemKey, CentralWarehouseKey, CloseStockWk00 "
+        f"FROM fpo.tbl_CalcWarehouseStock WHERE ItemKey = ?{cws_wh_filter}",
         cws_params,
     )
 
-    # CalcStoreStock — excluded to reduce payload; forecast/demand are already aggregated by warehouse/week
-
-    # Forecast by warehouse/week — 53 weeks from current week (week 1 = week we are in)
-    fc_result = get_forecast_by_warehouse_week(
-        item_key=item_key, central_warehouse_code=central_warehouse_code,
-        max_weeks=53, start_from_current_week=True
+    # 53-week series (forecast, demand, store stock, warehouse stock reference)
+    tables["forecast_by_warehouse_week"] = (
+        get_forecast_by_warehouse_week(
+            item_key=item_key, central_warehouse_code=central_warehouse_code,
+            start_from_current_week=True,
+        ).get("results") or []
     )
-    tables["forecast_by_warehouse_week"] = fc_result.get("results") or []
-
-    # Demand by warehouse/week — 53 weeks from current week
-    dm_result = get_demand_by_warehouse_week(
-        item_key=item_key, central_warehouse_code=central_warehouse_code,
-        max_weeks=53, start_from_current_week=True
+    tables["demand_by_warehouse_week"] = (
+        get_demand_by_warehouse_week(
+            item_key=item_key, central_warehouse_code=central_warehouse_code,
+            start_from_current_week=True,
+        ).get("results") or []
     )
-    tables["demand_by_warehouse_week"] = dm_result.get("results") or []
-
-    # WhStock by warehouse/week — CloseStockWkNN from CalcWarehouseStock per CalcWeekNo
-    wh_result = get_whstock_by_warehouse_week(
-        item_key=item_key, central_warehouse_code=central_warehouse_code,
-        start_from_current_week=True
+    tables["ststock_by_warehouse_week"] = (
+        get_ststock_by_warehouse_week(
+            item_key=item_key, central_warehouse_code=central_warehouse_code,
+            start_from_current_week=True,
+        ).get("results") or []
     )
-    tables["whstock_by_warehouse_week"] = wh_result.get("results") or []
-
-    # StStock by warehouse/week — SUM(CloseStockWkNN) across stores per CalcWeekNo
-    st_result = get_ststock_by_warehouse_week(
-        item_key=item_key, central_warehouse_code=central_warehouse_code,
-        start_from_current_week=True
-    )
-    tables["ststock_by_warehouse_week"] = st_result.get("results") or []
-
-    # ItemWarehouseLeadtime
-    tables["fpo_tbl_ItemWarehouseLeadtime"], _ = _query_safe(
-        "SELECT * FROM fpo.tbl_ItemWarehouseLeadtime WHERE ItemKey = ?",
-        [item_key],
+    tables["whstock_by_warehouse_week_ref"] = (
+        get_whstock_by_warehouse_week(
+            item_key=item_key, central_warehouse_code=central_warehouse_code,
+            start_from_current_week=True,
+        ).get("results") or []
     )
 
+    # ItemWarehouseLeadtime (DeliveryDateWk01..53, BlockReasonWk01..53)
+    if wh_key is not None:
+        tables["fpo_tbl_ItemWarehouseLeadtime"], _ = _query_safe(
+            "SELECT * FROM fpo.tbl_ItemWarehouseLeadtime WHERE ItemKey = ? AND CentralWarehouseKey = ?",
+            [item_key, wh_key],
+        )
+    else:
+        tables["fpo_tbl_ItemWarehouseLeadtime"], _ = _query_safe(
+            "SELECT * FROM fpo.tbl_ItemWarehouseLeadtime WHERE ItemKey = ?", [item_key],
+        )
 
-    # CalcTimelineWeek — 53 weeks from current week (week 1 = week we are in)
+    # 53-week calendar from current week
     start_week = _get_current_calc_week_no()
     tables["fpo_tbl_CalcTimelineWeek"], _ = _query_safe(
         "SELECT TOP 53 CalcWeekNo, YearAndWeek, WeekStartDate, WeekEndDate "
@@ -964,82 +523,315 @@ def get_item_ordering_data(
         [start_week],
     )
 
-    # Cover configs (current week)
+    # Cover configs (current week-of-year)
     tables["fpo_tbl_ConfigStoreCover"], _ = _query_safe(
         "SELECT * FROM fpo.tbl_ConfigStoreCover WHERE WeekOfYear = DATEPART(ISO_WEEK, GETDATE())",
     )
     tables["fpo_tbl_ConfigWarehouseCover"], _ = _query_safe(
         "SELECT * FROM fpo.tbl_ConfigWarehouseCover WHERE WeekOfYear = DATEPART(ISO_WEEK, GETDATE())",
     )
-    tables["fpo_tbl_ImportCoverConfig"], _ = _query_safe(
-        "SELECT * FROM fpo.tbl_ImportCoverConfig WHERE WeekOfYear = DATEPART(ISO_WEEK, GETDATE())",
-    )
+    if central_warehouse_code:
+        tables["fpo_tbl_ImportCoverConfig"], _ = _query_safe(
+            "SELECT * FROM fpo.tbl_ImportCoverConfig "
+            "WHERE WeekOfYear = DATEPART(ISO_WEEK, GETDATE()) AND CentralWarehouseCode = ?",
+            [central_warehouse_code.strip()],
+        )
+    else:
+        tables["fpo_tbl_ImportCoverConfig"], _ = _query_safe(
+            "SELECT * FROM fpo.tbl_ImportCoverConfig WHERE WeekOfYear = DATEPART(ISO_WEEK, GETDATE())",
+        )
 
-    current_week = _get_current_calc_week_no()
+    # Multi-warehouse rollup summary
+    multi_wh_summary: Optional[List[Dict[str, Any]]] = None
+    if include_all_warehouses and not central_warehouse_code:
+        mw_rows, _ = _query_safe(
+            "SELECT cw.CentralWarehouseCode, cw.CentralWarehouseName, "
+            "cws.CloseStockWk00, iw.CategoryABC, iw.ReqPO, iw.SafetyStockQty "
+            "FROM fpo.tbl_CalcWarehouseStock cws "
+            "JOIN bicache.tbl_CentralWarehouse cw ON cw.CentralWarehouseKey = cws.CentralWarehouseKey "
+            "LEFT JOIN fpo.tbl_ItemWarehouse iw "
+            "  ON iw.ItemKey = cws.ItemKey AND iw.CentralWarehouseKey = cws.CentralWarehouseKey "
+            "WHERE cws.ItemKey = ?",
+            [item_key],
+        )
+        multi_wh_summary = mw_rows or []
+
+    result: Dict[str, Any] = {
+        "status": "ok",
+        "item_number": item_number,
+        "item_key": item_key,
+        "current_calc_week_no": start_week,
+        "warehouse_code": central_warehouse_code,
+        "orders_excluded": True,
+        "tables": {k: v for k, v in tables.items() if v is not None},
+        "counts": {k: len(v or []) for k, v in tables.items()},
+    }
+    if multi_wh_summary is not None:
+        result["multi_warehouse_summary"] = multi_wh_summary
+    return result
+
+
+# ---------------------------------------------------------------------------
+# AGENT TOOL 2: get_fpo_source_table
+# ---------------------------------------------------------------------------
+
+_FPO_SOURCE_TABLES: Dict[str, Dict[str, Any]] = {
+    # bicache schema
+    "bicache.tbl_Item":             {"purpose": "Item master data",                        "item_col": "ItemKey",    "wh_col": None,                  "wh_code_col": None},
+    "bicache.tbl_CentralWarehouse": {"purpose": "Warehouse reference data",                "item_col": None,         "wh_col": "CentralWarehouseKey", "wh_code_col": "CentralWarehouseCode"},
+    "bicache.tbl_Calendar":         {"purpose": "Calendar source for timeline building",   "item_col": None,         "wh_col": None,                  "wh_code_col": None},
+    "bicache.tbl_Store":            {"purpose": "Store reference data",                    "item_col": None,         "wh_col": None,                  "wh_code_col": None},
+    # model schema
+    "model.tbl_CoreAssortment":          {"purpose": "Master item-warehouse assortment list",   "item_col": "ItemKey",    "wh_col": "CentralWarehouseKey", "wh_code_col": None},
+    "model.tbl_Item":                    {"purpose": "Production lead time & compliance flags", "item_col": "ItemKey",    "wh_col": None,                  "wh_code_col": None},
+    "model.tbl_StockStoreOnHand":        {"purpose": "Opening on-hand stock per store",         "item_col": "ItemKeyNew", "wh_col": None,                  "wh_code_col": None},
+    "model.tbl_StockWarehouseOnHand":    {"purpose": "Opening on-hand stock per warehouse",     "item_col": "ItemKeyNew", "wh_col": "CentralWarehouseKey", "wh_code_col": None},
+    "model.tbl_StockOpenPurchaseOrders": {"purpose": "AX open purchase orders",                 "item_col": "ItemKey",    "wh_col": "CentralWarehouseKey", "wh_code_col": None},
+    "model.tbl_StockInTransit":          {"purpose": "In-transit stock per store",              "item_col": "ItemKey",    "wh_col": None,                  "wh_code_col": None},
+    # fpo schema — config/reference
+    "fpo.tbl_ImportCoverConfig":  {"purpose": "Store and warehouse cover week config", "item_col": None,      "wh_col": None,                  "wh_code_col": "CentralWarehouseCode"},
+    "fpo.tbl_ProductionLeadTime": {"purpose": "Production lead times",                "item_col": "ItemKey", "wh_col": None,                  "wh_code_col": None},
+    "fpo.tbl_ShippingLeadTime":   {"purpose": "Shipping lead times",                  "item_col": None,      "wh_col": "CentralWarehouseKey", "wh_code_col": None},
+    "fpo.tbl_ItemDataIssueType":  {"purpose": "Data issue type lookup",               "item_col": None,      "wh_col": None,                  "wh_code_col": None},
+    "fpo.PO_CalcAOQ":             {"purpose": "Average order quantity source",        "item_col": "ItemKey", "wh_col": "CentralWarehouseKey", "wh_code_col": None},
+    "fpo.PO_CalcEOQ":             {"purpose": "Economic order quantity source",       "item_col": "ItemKey", "wh_col": "CentralWarehouseKey", "wh_code_col": None},
+    "fpo.PO_CalcLOQ":             {"purpose": "Last order quantity source",           "item_col": "ItemKey", "wh_col": "CentralWarehouseKey", "wh_code_col": None},
+    # config schema
+    "config.tbl_Country":             {"purpose": "Country pallet order flags", "item_col": None, "wh_col": None, "wh_code_col": None},
+    "config.tbl_CountryDowntimeType": {"purpose": "CNY delay calculation",      "item_col": None, "wh_col": None, "wh_code_col": None},
+    "config.tbl_DowntimeType":        {"purpose": "CNY delay type lookup",      "item_col": None, "wh_col": None, "wh_code_col": None},
+    "config.tbl_DowntimeDates":       {"purpose": "CNY delay date ranges",      "item_col": None, "wh_col": None, "wh_code_col": None},
+    # bet schema
+    "bet.tbl_TOOL_VersionControl": {"purpose": "Active forecast version",      "item_col": None,      "wh_col": None,                  "wh_code_col": None},
+    "bet.tbl_TOOL_ABC":            {"purpose": "ABC category classification",   "item_col": "ItemKey", "wh_col": "CentralWarehouseKey", "wh_code_col": None},
+    # bed schema
+    "bed.DATA_WHItem_QtySS":       {"purpose": "Safety stock quantities",       "item_col": "ItemKey", "wh_col": "CentralWarehouseKey", "wh_code_col": None},
+    # cam schema
+    "cam.TOOL_CurrentAgreementWH": {"purpose": "Cost/rate data per item-warehouse", "item_col": "ItemKey", "wh_col": "CentralWarehouseKey", "wh_code_col": None},
+}
+
+
+def get_fpo_source_table(
+    table_name: str,
+    item_key: Optional[int] = None,
+    item_number: Optional[str] = None,
+    central_warehouse_key: Optional[int] = None,
+    central_warehouse_code: Optional[str] = None,
+    top_n: int = 200,
+) -> Dict[str, Any]:
+    """
+    Fetch rows from any FPO raw source table (read-only; no calculated/output tables).
+
+    Pass table_name="list" to get the full catalogue of available tables and their purpose.
+
+    Available tables (schema.table):
+      bicache: tbl_Item, tbl_CentralWarehouse, tbl_Calendar, tbl_Store
+      model:   tbl_CoreAssortment, tbl_Item, tbl_StockStoreOnHand,
+               tbl_StockWarehouseOnHand, tbl_StockOpenPurchaseOrders, tbl_StockInTransit
+      fpo:     tbl_ImportCoverConfig, tbl_ProductionLeadTime, tbl_ShippingLeadTime,
+               tbl_ItemDataIssueType, PO_CalcAOQ, PO_CalcEOQ, PO_CalcLOQ
+      config:  tbl_Country, tbl_CountryDowntimeType, tbl_DowntimeType, tbl_DowntimeDates
+      bet:     tbl_TOOL_VersionControl, tbl_TOOL_ABC
+      bed:     DATA_WHItem_QtySS
+      cam:     TOOL_CurrentAgreementWH
+
+    Filters applied when the table supports the column and the value is supplied:
+      item_number / item_key          → ItemKey (or ItemKeyNew for model stock tables)
+      central_warehouse_code / key   → CentralWarehouseKey or CentralWarehouseCode
+    """
+    if (table_name or "").strip().lower() == "list":
+        return {"status": "ok", "tables": {k: v["purpose"] for k, v in _FPO_SOURCE_TABLES.items()}}
+
+    normalised = (table_name or "").strip()
+    meta = _FPO_SOURCE_TABLES.get(normalised)
+    if meta is None:
+        return {
+            "status": "error",
+            "message": f"Unknown table '{normalised}'. Call with table_name='list' for the full catalogue.",
+            "allowed_tables": sorted(_FPO_SOURCE_TABLES.keys()),
+        }
+
+    limit = _normalize_top_n(top_n, 500)
+    filters_sql: List[str] = []
+    params: List[Any] = []
+
+    # Resolve item_key from item_number
+    resolved_item_key = item_key
+    if resolved_item_key is None and item_number:
+        ik_rows, _ = _query_safe(
+            "SELECT TOP 1 ItemKey FROM bicache.tbl_Item WHERE ItemNumber = ?",
+            [item_number.strip()],
+        )
+        if ik_rows:
+            resolved_item_key = int(ik_rows[0]["ItemKey"])
+
+    item_col = meta.get("item_col")
+    if item_col and resolved_item_key is not None:
+        filters_sql.append(f"{item_col} = ?")
+        params.append(resolved_item_key)
+
+    # Resolve warehouse key from code
+    resolved_wh_key = central_warehouse_key
+    if resolved_wh_key is None and central_warehouse_code:
+        wk_rows, _ = _query_safe(
+            "SELECT TOP 1 CentralWarehouseKey FROM bicache.tbl_CentralWarehouse WHERE CentralWarehouseCode = ?",
+            [central_warehouse_code.strip()],
+        )
+        if wk_rows:
+            resolved_wh_key = int(wk_rows[0]["CentralWarehouseKey"])
+
+    wh_col      = meta.get("wh_col")
+    wh_code_col = meta.get("wh_code_col")
+    if wh_col and resolved_wh_key is not None:
+        filters_sql.append(f"{wh_col} = ?")
+        params.append(resolved_wh_key)
+    elif wh_code_col and central_warehouse_code:
+        filters_sql.append(f"{wh_code_col} = ?")
+        params.append(central_warehouse_code.strip())
+
+    where = ("WHERE " + " AND ".join(filters_sql)) if filters_sql else ""
+    sql = f"SELECT TOP ({limit}) * FROM {normalised} {where}"
+    rows, err = _query_safe(sql, params if params else None)
+    if err:
+        return {"status": "error", "table": normalised, "message": err, "results": []}
+    return {
+        "status": "ok",
+        "table": normalised,
+        "purpose": meta["purpose"],
+        "count": len(rows),
+        "filters_applied": {
+            "item_key": resolved_item_key if item_col and resolved_item_key is not None else None,
+            "central_warehouse_key": resolved_wh_key if wh_col and resolved_wh_key is not None else None,
+            "central_warehouse_code": central_warehouse_code if wh_code_col and central_warehouse_code else None,
+        },
+        "results": rows,
+    }
+
+
+# ---------------------------------------------------------------------------
+# API-only: cursor_simulation, validate_proposal
+# (used by api.py endpoints — not registered as agent tools)
+# ---------------------------------------------------------------------------
+
+def cursor_simulation(
+    item_number: str,
+    warehouse_code: str,
+    hypothetical_orders: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    """
+    Step week-by-week through projected warehouse stock with optional order injections.
+
+    Fetches opening stock (CloseStockWk00), 53-week demand and forecast, and the
+    calendar from the DB, then simulates closing stock week by week.
+
+    hypothetical_orders: list of {"week_index": int (1-53), "quantity": int/float}
+      Multiple entries for the same week_index are summed.
+      week_index=1 is the current week (demand = 0 per business rules).
+    """
+    if not (item_number or "").strip():
+        return {"status": "error", "message": "item_number required"}
+    if not (warehouse_code or "").strip():
+        return {"status": "error", "message": "warehouse_code required"}
+
+    item_rows, err = _query_safe(
+        "SELECT TOP 1 ItemKey FROM bicache.tbl_Item WHERE ItemNumber = ?",
+        [item_number.strip()],
+    )
+    if err or not item_rows:
+        return {"status": "error", "message": f"Item '{item_number}' not found: {err or 'not found'}"}
+    item_key = int(item_rows[0]["ItemKey"])
+
+    wh_rows, err = _query_safe(
+        "SELECT TOP 1 CentralWarehouseKey FROM bicache.tbl_CentralWarehouse WHERE CentralWarehouseCode = ?",
+        [warehouse_code.strip()],
+    )
+    if err or not wh_rows:
+        return {"status": "error", "message": f"Warehouse '{warehouse_code}' not found: {err or 'not found'}"}
+    wh_key = int(wh_rows[0]["CentralWarehouseKey"])
+
+    stock_rows, err = _query_safe(
+        "SELECT TOP 1 CloseStockWk00 FROM fpo.tbl_CalcWarehouseStock "
+        "WHERE ItemKey = ? AND CentralWarehouseKey = ?",
+        [item_key, wh_key],
+    )
+    if err or not stock_rows:
+        return {"status": "error", "message": f"No warehouse stock found: {err or 'not found'}"}
+    opening_stock = float(stock_rows[0].get("CloseStockWk00") or 0)
+
+    demand_by_cwn: Dict[int, float] = {
+        int(r["CalcWeekNo"]): float(r.get("Demand") or 0)
+        for r in (get_demand_by_warehouse_week(
+            item_key=item_key, central_warehouse_code=warehouse_code,
+            start_from_current_week=True,
+        ).get("results") or [])
+    }
+    forecast_by_cwn: Dict[int, float] = {
+        int(r["CalcWeekNo"]): float(r.get("Forecast") or 0)
+        for r in (get_forecast_by_warehouse_week(
+            item_key=item_key, central_warehouse_code=warehouse_code,
+            start_from_current_week=True,
+        ).get("results") or [])
+    }
+
+    start_week = _get_current_calc_week_no()
+    timeline_rows, err = _query_safe(
+        "SELECT TOP 53 CalcWeekNo, YearAndWeek, WeekStartDate, WeekEndDate "
+        "FROM fpo.tbl_CalcTimelineWeek WHERE CalcWeekNo >= ? ORDER BY CalcWeekNo",
+        [start_week],
+    )
+    if err or not timeline_rows:
+        return {"status": "error", "message": f"Timeline fetch failed: {err or 'empty'}"}
+
+    injected: Dict[int, float] = {}
+    for order in (hypothetical_orders or []):
+        wi = int(order.get("week_index", 0))
+        qty = float(order.get("quantity", 0))
+        if 1 <= wi <= 53 and qty > 0:
+            injected[wi] = injected.get(wi, 0.0) + qty
+
+    stock = opening_stock
+    trajectory: List[Dict[str, Any]] = []
+    stockout_weeks: List[int] = []
+
+    for i, week in enumerate(timeline_rows):
+        week_index = i + 1
+        cwn        = int(week["CalcWeekNo"])
+        demand     = 0.0 if week_index == 1 else demand_by_cwn.get(cwn, 0.0)
+        forecast   = forecast_by_cwn.get(cwn, 0.0)
+        qty_in     = injected.get(week_index, 0.0)
+        stock      = stock + qty_in - demand
+        rounded    = round(stock, 2)
+
+        trajectory.append({
+            "week_index":       week_index,
+            "calc_week_no":     cwn,
+            "year_week":        str(week.get("YearAndWeek", "")),
+            "week_start_date":  str(week.get("WeekStartDate", "")),
+            "week_end_date":    str(week.get("WeekEndDate", "")),
+            "forecast":         round(forecast, 4),
+            "demand":           round(demand, 4),
+            "injected_quantity": qty_in,
+            "closing_stock":    rounded,
+        })
+        if rounded < 0:
+            stockout_weeks.append(week_index)
+
+    min_stock = min((e["closing_stock"] for e in trajectory), default=0.0)
     return {
         "status": "ok",
         "item_number": item_number,
         "item_key": item_key,
-        "current_calc_week_no": current_week,
-        "tables": {k: v for k, v in tables.items() if v is not None},
-        "counts": {k: len(v or []) for k, v in tables.items()},
-    }
-
-
-def get_core_ordering_schema_reference() -> Dict[str, Any]:
-    """
-    Returns the canonical table reference for core re-ordering.
-    Use this to understand available tables and their purpose before querying.
-    """
-    return {
-        "database": "PlanningToolsDb",
-        "batch_tool": "get_item_ordering_data(item_number, central_warehouse_code?) — fetches all reorder tables in ONE call",
-        "forecast_tool": "get_forecast_by_warehouse_week — maps CalcWeekNo to ForecastWkNN, sums across stores (css JOIN fss)",
-        "demand_tool": "get_demand_by_warehouse_week — maps CalcWeekNo to StockInWkNN, sums across stores (css only)",
-        "whstock_tool": "whstock_by_warehouse_week — maps CalcWeekNo to CloseStockWkNN from CalcWarehouseStock",
-        "ststock_tool": "ststock_by_warehouse_week — maps CalcWeekNo to SUM(CloseStockWkNN) across stores from CalcStoreStock",
-        "tables": {
-            "bicache.tbl_Item": "Item master — dimensions, carton/pallet sizes, MOQ, country of origin",
-            "bicache.tbl_CentralWarehouse": "Warehouse master — codes and keys",
-            "model.tbl_StockWarehouseOnHand": "Current warehouse on-hand stock",
-            "model.tbl_StockStoreOnHand": "Current store on-hand stock",
-            "model.tbl_StoreWarehouseRelationship": "Store-to-warehouse mapping with validity dates",
-            "model.tbl_CoreAssortment": "Core assortment by item/warehouse",
-            "fpo.tbl_ForecastStoreSales": "Per-store weekly forecast (ForecastWk01..53)",
-            "fpo.tbl_CalcTimelineDay": "Daily calc timeline — CalcDate, YearAndWeek, CalcWeekNo",
-            "fpo.tbl_CalcTimelineWeek": "Weekly calc timeline — CalcWeekNo, YearAndWeek, WeekStartDate, WeekEndDate",
-            "fpo.tbl_CalcStoreStock": "Store calc state — StockInWk01..53 (demand), CloseStockWk00..53",
-            "fpo.tbl_CalcWarehouseStock": "Warehouse calc state — CloseStockWk00..53 (closing stock per week)",
-            "fpo.tbl_ItemWarehouse": "Item/warehouse config — CategoryABC, ReqPO, SafetyStockQty, ShipLT, TotalLT",
-            "fpo.tbl_ItemWarehouseOrderQty": "Order quantity controls — OrderQtyType, AOQ, EOQ, LOQ, SOQ",
-            "fpo.tbl_ItemWarehouseLeadtime": "Lead time calendar — DeliveryDateWk01..20, BlockReasonWk01..20, ReqPostDateWk01..20",
-            "fpo.tbl_ConfigStoreCover": "Store cover weeks by ABC and week-of-year",
-            "fpo.tbl_ConfigWarehouseCover": "Warehouse cover weeks by ABC and week-of-year",
-            "fpo.tbl_ImportCoverConfig": "Import cover weeks by warehouse/ABC/week-of-year",
-            "am.tbl_JobControl": "Job control state",
-            "am.tbl_JobControlHistory": "Job run history",
+        "warehouse_code": warehouse_code,
+        "opening_stock": opening_stock,
+        "hypothetical_orders": hypothetical_orders or [],
+        "total_injected": sum(injected.values()),
+        "trajectory": trajectory,
+        "summary": {
+            "weeks_simulated":    len(trajectory),
+            "stockout_weeks":     stockout_weeks,
+            "min_closing_stock":  round(min_stock, 2),
+            "first_stockout_week": stockout_weeks[0] if stockout_weeks else None,
         },
-        "notes": [
-            "For core reordering: call get_item_ordering_data(item_number) first — one call returns all tables.",
-            "Agent must perform all reasoning and aggregation from raw table data.",
-            "StockInWk columns in CalcStoreStock = demand pulled from warehouse to stores.",
-            "CloseStockWk00 in CalcWarehouseStock = opening (current) warehouse stock.",
-            "Week alignment: forecast, demand, CalcTimelineWeek start from current week. week_index 1 = current week (e.g. CalcWeekNo 12). Always 53 weeks.",
-        ],
-    }
-
-
-def run_planning_tools_readonly_query(sql_query: str) -> Dict[str, Any]:
-    """
-    Execute a read-only SQL query (SELECT/CTE only) against PlanningToolsDB.
-    Use for custom queries not covered by the dedicated table-fetch tools.
-    """
-    _ensure_read_only_sql(sql_query)
-    rows = _query(sql_query)
-    return {
-        "count": len(rows),
-        "results": rows[:500],
-        "truncated": len(rows) > 500,
     }
 
 
@@ -1048,39 +840,99 @@ def validate_proposal(
     reorderPoint: int,
     casePack: int,
     moq: int = 0,
+    aoq: Optional[int] = None,
+    eoq: Optional[int] = None,
+    loq: Optional[int] = None,
+    soq: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
-    Enforce reorder constraints and return the adjusted quantity.
-    Rounds up to the nearest casePack multiple, respecting reorderPoint and MOQ.
-    """
-    if casePack <= 0:
-        return {
-            "valid": False,
-            "adjusted_quantity": 0,
-            "issues": ["Invalid casePack; must be > 0"],
-        }
-    if reorderPoint < 0 or moq < 0:
-        return {
-            "valid": False,
-            "adjusted_quantity": 0,
-            "issues": ["reorderPoint and moq must be >= 0"],
-        }
+    Validate and adjust a proposed order quantity against all reorder constraints.
 
-    q = max(0, int(quantity))
-    q = max(q, int(reorderPoint), int(moq))
-    adjusted = int(math.ceil(q / casePack) * casePack) if q > 0 else 0
+    Constraint application order:
+      1. MOQ / AOQ floor
+      2. reorderPoint floor
+      3. EOQ rounding (round up to multiple)
+      4. casePack rounding (round up to multiple)
+      5. LOQ cap (hard maximum)
+      6. SOQ rounding (round up to multiple, applied last)
+    """
+    constraints = {
+        "reorderPoint": reorderPoint, "casePack": casePack, "moq": moq,
+        "aoq": aoq, "eoq": eoq, "loq": loq, "soq": soq,
+    }
+    if casePack <= 0:
+        return {"valid": False, "input_quantity": int(quantity), "adjusted_quantity": 0,
+                "adjustment_made": True, "reasoning": [], "issues": ["Invalid casePack; must be > 0"],
+                "constraints": constraints}
+    if reorderPoint < 0 or moq < 0:
+        return {"valid": False, "input_quantity": int(quantity), "adjusted_quantity": 0,
+                "adjustment_made": True, "reasoning": [], "issues": ["reorderPoint and moq must be >= 0"],
+                "constraints": constraints}
+
+    reasoning: List[str] = []
+    original = max(0, int(quantity))
+    q = original
+
+    effective_moq = int(moq)
+    if aoq is not None and int(aoq) > effective_moq:
+        effective_moq = int(aoq)
+        reasoning.append(f"AOQ={aoq} exceeds MOQ={moq}; using AOQ as minimum floor.")
+    if q < effective_moq:
+        reasoning.append(f"Raised from {q} to MOQ/AOQ floor {effective_moq}.")
+        q = effective_moq
+    elif effective_moq > 0:
+        reasoning.append(f"MOQ/AOQ floor {effective_moq} satisfied (quantity {q} >= floor).")
+
+    rp = int(reorderPoint)
+    if q < rp:
+        reasoning.append(f"Raised from {q} to reorderPoint floor {rp}.")
+        q = rp
+    elif rp > 0:
+        reasoning.append(f"reorderPoint {rp} satisfied (quantity {q} >= reorderPoint).")
+
+    if eoq is not None and int(eoq) > 0:
+        eoq_int = int(eoq)
+        r = int(math.ceil(q / eoq_int) * eoq_int) if q > 0 else 0
+        if r != q:
+            reasoning.append(f"Rounded up from {q} to EOQ multiple of {eoq_int}: {r}.")
+        else:
+            reasoning.append(f"EOQ={eoq_int}: quantity {q} is already a valid multiple.")
+        q = r
+
+    if q > 0:
+        r = int(math.ceil(q / casePack) * casePack)
+        if r != q:
+            reasoning.append(f"Rounded up from {q} to casePack multiple of {casePack}: {r}.")
+        else:
+            reasoning.append(f"casePack={casePack}: quantity {q} is already a valid multiple.")
+        q = r
+
+    if loq is not None and int(loq) > 0 and q > int(loq):
+        reasoning.append(f"Capped from {q} down to LOQ maximum {int(loq)}.")
+        q = int(loq)
+
+    if soq is not None and int(soq) > 0:
+        soq_int = int(soq)
+        r = int(math.ceil(q / soq_int) * soq_int) if q > 0 else 0
+        if r != q:
+            reasoning.append(f"Rounded up from {q} to SOQ multiple of {soq_int}: {r}.")
+        else:
+            reasoning.append(f"SOQ={soq_int}: quantity {q} is already a valid multiple.")
+        q = r
+
+    if not reasoning:
+        reasoning.append("No adjustment needed; quantity satisfies all constraints as supplied.")
 
     issues: List[str] = []
-    if quantity != adjusted:
-        issues.append("Quantity adjusted to satisfy reorderPoint/moq/casePack constraints.")
+    if q != original:
+        issues.append(f"Quantity adjusted from {original} to {q} to satisfy constraints.")
 
     return {
         "valid": True,
-        "adjusted_quantity": adjusted,
+        "input_quantity": original,
+        "adjusted_quantity": q,
+        "adjustment_made": q != original,
+        "reasoning": reasoning,
         "issues": issues,
-        "constraints": {
-            "reorderPoint": reorderPoint,
-            "casePack": casePack,
-            "moq": moq,
-        },
+        "constraints": constraints,
     }
