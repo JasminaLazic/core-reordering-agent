@@ -1,16 +1,19 @@
 import os
 import re
 import json
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from agents.core_ordering_agent import get_core_ordering_agent
-from agents.tools.core_ordering_tools import validate_proposal
+from agents.tools.core_ordering_tools import (
+    get_item_ordering_data,
+    validate_proposal,
+)
 
 
 class QueryRequest(BaseModel):
@@ -30,6 +33,10 @@ class ValidateProposalRequest(BaseModel):
     reorderPoint: int
     casePack: int
     moq: int = 0
+    aoq: Optional[int] = Field(default=None, description="Agreed/Actual Order Qty — additional MOQ floor")
+    eoq: Optional[int] = Field(default=None, description="Economic Order Qty — round up to this multiple")
+    loq: Optional[int] = Field(default=None, description="Largest Order Qty — hard cap")
+    soq: Optional[int] = Field(default=None, description="Standard Order Qty — round up to this multiple (applied last)")
 
 
 def _try_parse_json_response(text: str) -> dict[str, Any] | None:
@@ -179,9 +186,39 @@ async def chat(req: ChatRequest) -> Dict[str, Any]:
         }
 
 
+@app.get("/api/item-ordering-data/{item_number}")
+def item_ordering_data(
+    item_number: str,
+    warehouse_code: Optional[str] = Query(default=None, description="Filter to a single warehouse (e.g. DK01WH)"),
+    include_all_warehouses: bool = Query(
+        default=False,
+        description="Return data for all warehouses that carry this item (ignored when warehouse_code is set)",
+    ),
+) -> Dict[str, Any]:
+    """
+    Supply all data needed for an independent recommendation scenario:
+    item master/config, demand, forecast, warehouse/store closing stock,
+    cover configs, leadtime calendar, and a 53-week timeline.
+    No actual orders are included in the response.
+    """
+    result = get_item_ordering_data(
+        item_number=item_number.strip(),
+        central_warehouse_code=warehouse_code,
+        include_all_warehouses=include_all_warehouses,
+    )
+    return {"type": "item_ordering_data", **result}
+
+
+
 @app.post("/api/reorder/validate")
 def reorder_validate(req: ValidateProposalRequest) -> Dict[str, Any]:
-    """Validate/enforce reorder constraints for a proposed quantity."""
+    """
+    Validate and adjust a proposed order quantity against all reorder constraints.
+
+    Applies constraints in order: MOQ/AOQ floor → reorderPoint floor → EOQ rounding →
+    casePack rounding → LOQ cap → SOQ rounding.
+    Returns adjusted quantity, step-by-step reasoning, and which constraints were active.
+    """
     return {
         "type": "proposal_validation",
         **validate_proposal(
@@ -189,5 +226,9 @@ def reorder_validate(req: ValidateProposalRequest) -> Dict[str, Any]:
             reorderPoint=req.reorderPoint,
             casePack=req.casePack,
             moq=req.moq,
+            aoq=req.aoq,
+            eoq=req.eoq,
+            loq=req.loq,
+            soq=req.soq,
         ),
     }
