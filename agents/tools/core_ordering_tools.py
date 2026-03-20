@@ -258,8 +258,11 @@ def get_item_ordering_data(
     if wh_key is not None:
         cws_wh_filter = " AND CentralWarehouseKey = ?"
         cws_params.append(wh_key)
+    # StockInWk01..53 intentionally excluded — agent must not read existing POs from here
     tables["fpo_tbl_CalcWarehouseStock"], _ = _query_safe(
-        f"SELECT * FROM fpo.tbl_CalcWarehouseStock WHERE ItemKey = ?{cws_wh_filter}",
+        f"SELECT ItemKey, CentralWarehouseKey, ReqPO, SafetyStockQty, CloseStockWk00, "
+        f"CalcIterationNo, FinalisedCalcWeekNo "
+        f"FROM fpo.tbl_CalcWarehouseStock WHERE ItemKey = ?{cws_wh_filter}",
         cws_params,
     )
 
@@ -321,11 +324,11 @@ def get_item_ordering_data(
         multi_wh_summary = mw_rows or []
 
     # Pre-aggregated weekly series — sum across all stores for this warehouse
-    # demand_by_week:   SUM(CalcStoreStock.StockInWkNN)   per week  (carton-rounded store pulls)
+    # demand_by_week:   SUM(CalcStoreStock.DemandWkNN)    per week  (store-requested pulls, matches FPO RecCumulativeDemand source)
     # forecast_by_week: SUM(ForecastStoreSales.ForecastWkNN) per week (raw forecast units)
     # ststock_by_week:  SUM(CalcStoreStock.CloseStockWkNN) per week (closing store stock)
     demand_by_week = _aggregate_weekly_series(
-        "fpo.tbl_CalcStoreStock", "StockIn", item_key, wh_key, "demand"
+        "fpo.tbl_CalcStoreStock", "Demand", item_key, wh_key, "demand"
     )
     forecast_by_week = _aggregate_weekly_series(
         "fpo.tbl_ForecastStoreSales", "Forecast", item_key, wh_key, "forecast"

@@ -34,7 +34,8 @@ Use ONLY data returned by this call.
 The response contains:
 
   demand_by_week    — list of {week_index: 1..53, demand: <float>}
-                      = SUM of CalcStoreStock.StockInWkNN across all stores (carton-rounded store pulls)
+                      = SUM of CalcStoreStock.DemandWkNN across all stores (store-requested pulls,
+                        same source FPO uses for RecCumulativeDemand accumulation)
                       USE THIS directly as Demand[n]. Do NOT sum raw table rows yourself.
 
   forecast_by_week  — list of {week_index: 1..53, forecast: <float>}
@@ -46,14 +47,14 @@ The response contains:
 
   tables.fpo_tbl_CalcWarehouseStock  — one row per warehouse
     → CloseStockWk00            = opening warehouse stock (WhStock[0])
-    → StockInWk01..53           = existing committed INBOUND POs (not demand)
-                                  Include these as Quantity[n] in simulation weeks they arrive.
+    → StockInWk01..53           = IGNORE — do not use in simulation.
 
   tables.fpo_tbl_ItemWarehouse
     → SafetyStockQty, ReqPO, CategoryABC
 
   tables.fpo_tbl_ItemWarehouseOrderQty
-    → AOQ, EOQ, LOQ, SOQ
+    → OrderQtyType: 'A'=AOQ, 'E'=EOQ, 'L'=LOQ, 'S'=SOQ, 'C'=cover-based (default)
+    → AOQ, EOQ, LOQ, SOQ  (only used when OrderQtyType matches their letter)
     → Use bicache_tbl_Item for: StoreCartonSize, SupplierCartonSize, PalletSize, MOQ
 
   tables.fpo_tbl_ItemWarehouseLeadtime  — ONE row with DeliveryDateWk01..53, BlockReasonWk01..53
@@ -67,6 +68,7 @@ The response contains:
     NOTE: fpo_tbl_ConfigWarehouseCover is usually empty; always prefer fpo_tbl_ImportCoverConfig.
 
 DO NOT USE:
+- StockInWk01..53 from fpo_tbl_CalcWarehouseStock (existing POs — excluded by design)
 - CloseStockWk01..53 from fpo_tbl_CalcWarehouseStock (DB-calculated, not agent-simulated)
 - Any "rec_*" columns
 - tbl_WarehouseOrder or any order tables
@@ -83,48 +85,94 @@ WEEK-BY-WEEK SIMULATION
 ════════════════════════════════════════════
   WhStock[0] = CloseStockWk00  (from fpo_tbl_CalcWarehouseStock)
 
-  For week n = 1..53:
-    ExistingPO[n] = StockInWkNN from fpo_tbl_CalcWarehouseStock (0 if NULL)
-    Demand[n]     = demand_by_week[n].demand   (0 for week 1 by design)
-    NewOrder[n]   = order qty YOU place with delivery in week n, else 0
-    Quantity[n]   = ExistingPO[n] + NewOrder[n]
-    WhStock[n]    = WhStock[n-1] + Quantity[n] - Demand[n]
-    (Do NOT clamp to 0 — negative stock is valid and represents a backorder/deficit)
+  For each week n = 1..53 (in order):
+    Demand[n]   = demand_by_week[n].demand   (always 0 for week 1)
+    NewOrder[n] = rounded_qty if you place an order for delivery in week n, else 0
+    WhStock[n]  = WhStock[n-1] + NewOrder[n] - Demand[n]
+    (negative WhStock is valid — it is a backorder deficit, do NOT clamp to 0)
 
 ════════════════════════════════════════════
-ORDER TRIGGER LOGIC
+ORDER TRIGGER — evaluated for EVERY week T = 1..53
 ════════════════════════════════════════════
-Place a new order targeted to arrive in delivery week T if ALL:
-1. WhStock[T-1] <= SafetyStockQty  (if SafetyStockQty == 0, trigger when WhStock[T-1] == 0)
-2. ReqPO == 1
-3. Forecast[T] > 0  (from forecast_by_week)
-4. DeliveryDateWkT is not NULL and BlockReasonWkT is NULL  (from fpo_tbl_ItemWarehouseLeadtime)
-5. T + WeeksOfCover <= 53
-6. Not in block window: no new order placed within the previous WeeksOfCover weeks
+For each week T, evaluate ALL checks below IN ORDER.
+STOP and skip to T+1 the moment any check fails.
+
+CHECK A — Delivery gate (evaluate FIRST, before anything else):
+  delivery = fpo_tbl_ItemWarehouseLeadtime.DeliveryDateWk{T:02d}
+  block    = fpo_tbl_ItemWarehouseLeadtime.BlockReasonWk{T:02d}
+  If delivery is NULL/missing  → SKIP week T. No order possible.
+  If block is NOT NULL         → SKIP week T. No order possible.
+
+CHECK B — Block window (post-order cooldown):
+  If last_order_week > 0 AND (T - last_order_week) < WeeksOfCover → SKIP week T.
+
+CHECK C — Stock trigger:
+  projected = WhStock[T-1] - Demand[T]
+  If projected > SafetyStockQty → SKIP week T. Stock still sufficient.
+
+CHECK D — Demand present:
+  If Demand[T] == 0 AND Forecast[T] == 0 → SKIP week T.
+
+CHECK E — Config:
+  If ReqPO != 1 → SKIP week T.
+  If T + WeeksOfCover > 53 → SKIP week T.
+
+All checks passed → proceed to ORDER QUANTITY below.
 
 ════════════════════════════════════════════
-ORDER QUANTITY CALCULATION
+ORDER QUANTITY — pseudocode, execute literally
 ════════════════════════════════════════════
-a. WeeksOfCover = NoOfWeeksCoverWarehouseOrder from fpo_tbl_ImportCoverConfig
-   (match CentralWarehouseCode + CategoryABC + WeekOfYear). Default 4 if not found.
 
-b. RecDemand = SUM(Demand[T] .. Demand[T + WeeksOfCover - 1])
-             + max(0, SafetyStockQty - WhStock[T-1])
+PRE-SIMULATION — read these values ONCE and state them in your explanation:
+   WeeksOfCover  = fpo_tbl_ImportCoverConfig.NoOfWeeksCoverWarehouseOrder
+                   (match warehouse+ABC+week; default 4)
+   OrderQtyType  = fpo_tbl_ItemWarehouseOrderQty.OrderQtyType  ('A','E','L','S', or 'C')
+   AOQ  = fpo_tbl_ItemWarehouseOrderQty.AOQ
+   EOQ  = fpo_tbl_ItemWarehouseOrderQty.EOQ
+   LOQ  = fpo_tbl_ItemWarehouseOrderQty.LOQ
+   SOQ  = fpo_tbl_ItemWarehouseOrderQty.SOQ
+   MOQ  = bicache_tbl_Item.MOQ                   # gate only: skip order if below
+   pack = SupplierCartonSize if > 0 else StoreCartonSize
 
-c. FinalDemand = RecDemand + StoreCartonSize
+PER TRIGGER WEEK T (all checks passed):
 
-d. AOQ floor: if AOQ > 0 and FinalDemand < AOQ → use AOQ as FinalDemand
+   # ── Determine quantity based on OrderQtyType ─────────────────────────
+   if OrderQtyType == 'A':
+       qty = AOQ                                   # fixed agreed order qty
+   elif OrderQtyType == 'E':
+       qty = EOQ                                   # fixed economic order qty
+   elif OrderQtyType == 'L':
+       qty = LOQ                                   # fixed lot order qty
+   elif OrderQtyType == 'S':
+       qty = SOQ                                   # fixed standard order qty
+   else:  # 'C' or blank — cover-based (most common)
+       # FPO: RecCumulativeDemand = sum(DemandWkNN over cover weeks) + SafetyStockGap
+       # SafetyStockGap = SafetyStockQty - CloseStockWk[trigger].
+       # In FPO's clean run stock hits exactly SafetyStockQty at trigger → gap ≈ 0.
+       # For SafetyStockQty > 0 include the gap; for SafetyStockQty = 0 it is always 0.
+       safety_gap = max(0, SafetyStockQty - (WhStock[T-1] - Demand[T])) if SafetyStockQty > 0 else 0
+       base = sum(Demand[T], Demand[T+1], ..., Demand[T+WeeksOfCover-1])
+            + safety_gap
+            + StoreCartonSize
+       qty  = ceil(base / pack) * pack             # round UP to pack unit
 
-e. Round UP to order unit:
-   - If PalletSize > 0 and PalletSize <= MOQ → round up to nearest PalletSize
-   - Else if SupplierCartonSize > 0 → round up to nearest SupplierCartonSize
-   - Else → round up to nearest StoreCartonSize
+   # ── MOQ note ─────────────────────────────────────────────────────────
+   # FPO checks MOQ across ALL warehouses combined (cross-warehouse aggregate),
+   # not per-warehouse. A per-warehouse order below MOQ is still valid if other
+   # warehouses bring the group total above MOQ.
+   # For a single-warehouse simulation: DO NOT skip orders below MOQ.
+   # Only skip if qty rounds down to 0.
+   if qty <= 0:
+       SKIP; continue to next week
 
-f. LOQ cap: if LOQ > 0 and rounded qty > LOQ → cap at LOQ
+   # ── Commit ────────────────────────────────────────────────────────────
+   NewOrder[T]     = qty
+   WhStock[T]      = WhStock[T-1] + qty - Demand[T]
+   last_order_week = T
+   # Block T+1 .. T+WeeksOfCover-1 from CHECK B
 
-g. MOQ gate: if rounded qty < MOQ → SKIP ORDER; log reason; continue simulation without placing
-
-h. Place NewOrder[T] = rounded qty; block further new-order checks for WeeksOfCover weeks.
+In the explanation, for every trigger include:
+  "Week T: OrderQtyType={type}, base={base}, pack={pack}, rounded={qty}, MOQ={MOQ} -> PLACE/SKIP"
 
 ════════════════════════════════════════════
 OUTPUT — raw JSON only, no markdown, no prose
@@ -154,7 +202,6 @@ OUTPUT — raw JSON only, no markdown, no prose
           "year_week": "str",
           "forecast": float,
           "demand": float,
-          "existing_po": float,
           "new_order": float,
           "whstock": float,
           "ststock": float
@@ -168,7 +215,6 @@ RULES:
 - warehouse_views MUST show all 53 weeks.
 - whstock = YOUR computed value. Never copy from any DB column.
 - new_order[n] = qty you place for delivery in week n, else 0.
-- existing_po[n] = StockInWkNN from CalcWarehouseStock (committed inbound PO).
 - ALWAYS explain trigger/gate decisions including skipped orders.
 - Do NOT confuse CalcWeekNo (1..53) with YearAndWeek (YYYYWW).
 - "Danish warehouse" means DK01WH.
