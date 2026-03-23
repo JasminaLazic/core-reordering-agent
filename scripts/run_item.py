@@ -149,8 +149,8 @@ for view in parsed.get("warehouse_views") or []:
             st_map.get(wi, p.get("ststock")),
         ])
 
-with open(csv_out, "w", newline="", encoding="utf-8-sig") as f:
-    w = csv.writer(f, delimiter=";")
+with open(csv_out, "w", newline="", encoding="utf-8") as f:
+    w = csv.writer(f)
     w.writerow(headers)
     w.writerows(rows)
 

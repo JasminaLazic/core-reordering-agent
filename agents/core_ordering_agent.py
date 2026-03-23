@@ -408,7 +408,7 @@ async def get_core_ordering_agent() -> Agent:
         resolved_agent_id = await _resolve_agent_id_if_needed(CORE_ORDERING_AGENT_ID, credential)
         chat_client = CompatAzureAIAgentClient(
             project_endpoint=AI_FOUNDRY_PROJECT_ENDPOINT,
-            credential=credential,
+            async_credential=credential,
             agent_id=resolved_agent_id,
             model_deployment_name=MODEL_DEPLOYMENT_NAME,
         )
@@ -417,7 +417,7 @@ async def get_core_ordering_agent() -> Agent:
             get_fpo_source_table,
         ]
         return Agent(
-            client=chat_client,
+            chat_client=chat_client,
             tools=tools,
         )
 
