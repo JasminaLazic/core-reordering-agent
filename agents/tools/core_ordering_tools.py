@@ -324,11 +324,17 @@ def get_item_ordering_data(
         multi_wh_summary = mw_rows or []
 
     # Pre-aggregated weekly series — sum across all stores for this warehouse
-    # demand_by_week:   SUM(CalcStoreStock.DemandWkNN)    per week  (store-requested pulls, matches FPO RecCumulativeDemand source)
-    # forecast_by_week: SUM(ForecastStoreSales.ForecastWkNN) per week (raw forecast units)
-    # ststock_by_week:  SUM(CalcStoreStock.CloseStockWkNN) per week (closing store stock)
+    # demand_by_week:        SUM(CalcStoreStock.DemandWkNN)    per week
+    #                        = store-requested pulls, matches SQL RecCumulativeDemand source
+    # store_stockin_by_week: SUM(CalcStoreStock.StockInWkNN)   per week
+    #                        = store demand satisfied by warehouse, matches SQL W3 close-stock calc
+    # forecast_by_week:      SUM(ForecastStoreSales.ForecastWkNN) per week (raw forecast units)
+    # ststock_by_week:       SUM(CalcStoreStock.CloseStockWkNN) per week (closing store stock)
     demand_by_week = _aggregate_weekly_series(
         "fpo.tbl_CalcStoreStock", "Demand", item_key, wh_key, "demand"
+    )
+    store_stockin_by_week = _aggregate_weekly_series(
+        "fpo.tbl_CalcStoreStock", "StockIn", item_key, wh_key, "stockin"
     )
     forecast_by_week = _aggregate_weekly_series(
         "fpo.tbl_ForecastStoreSales", "Forecast", item_key, wh_key, "forecast"
@@ -345,6 +351,7 @@ def get_item_ordering_data(
         "warehouse_code": central_warehouse_code,
         "orders_excluded": True,
         "demand_by_week": demand_by_week,
+        "store_stockin_by_week": store_stockin_by_week,
         "forecast_by_week": forecast_by_week,
         "ststock_by_week": ststock_by_week,
         "tables": {k: v for k, v in tables.items() if v is not None},
