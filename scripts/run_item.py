@@ -58,7 +58,7 @@ if total_forecast == 0:
     print("\nCANNOT RUN: forecast is all zeros — item has no demand data")
     raise SystemExit(1)
 
-# ── 2. Read order constraints ─────────────────────────────────────────────────
+# ── 2. Print order constraints (diagnostic only) ──────────────────────────────
 tables    = tool_result.get("tables", {})
 oqty_rows = tables.get("fpo_tbl_ItemWarehouseOrderQty", [])
 item_rows  = tables.get("bicache_tbl_Item", [])
@@ -72,34 +72,13 @@ SOQ = oqty.get("SOQ") or 0
 MOQ = item.get("MOQ") or 0
 print(f"\nOrder constraints: OrderQtyType={order_qty_type}, AOQ={AOQ}, EOQ={EOQ}, LOQ={LOQ}, SOQ={SOQ}, MOQ={MOQ}")
 
-if order_qty_type in ("C", None, ""):
-    qty_hint = (
-        f"Since OrderQtyType='C', use cover-based formula: "
-        f"qty = ceil((demand_sum + StoreCarton) / pack) * pack. "
-        f"MOQ={MOQ} is cross-warehouse in FPO — do NOT skip orders below MOQ for single-warehouse run. "
-        f"Only skip if qty rounds to 0. "
-        f"Do NOT add safety-stock deficit to quantity when SafetyStockQty=0."
-    )
-else:
-    qty_hint = (
-        f"Since OrderQtyType='{order_qty_type}', use fixed qty "
-        f"(AOQ={AOQ}, EOQ={EOQ}, LOQ={LOQ}, SOQ={SOQ}). "
-        f"MOQ is cross-warehouse — do not skip single-warehouse orders below MOQ."
-    )
-
 # ── 3. Call the agent ─────────────────────────────────────────────────────────
 print(f"\nRequesting agent reorder: item={ITEM} warehouse={WH} ...")
 r = requests.post(
     "http://localhost:18010/api/query",
     json={"prompt": (
-        f"Call get_item_ordering_data(item_number='{ITEM}', central_warehouse_code='{WH}'). "
-        "Compute core reordering from scratch using CloseStockWk00 as opening stock. "
-        "Follow all trigger and quantity rules in your instructions exactly. "
-        f"ORDER QTY TYPE: OrderQtyType='{order_qty_type}'. {qty_hint} "
-        "After placing each order update WhStock and CONTINUE scanning every subsequent week until week 53. "
-        "Do NOT stop after the first recommendation — find ALL triggers across the full 53-week horizon. "
-        "Apply block window (WeeksOfCover weeks after each placed order) then resume scanning. "
-        "Return raw JSON with ALL recommendations and warehouse_views for all 53 weeks."
+        f"Call get_item_ordering_data(item_number='{ITEM}', central_warehouse_code='{WH}') "
+        "and run the full core reordering simulation."
     )},
     timeout=360,
 )

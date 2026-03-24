@@ -158,6 +158,46 @@
         padding: 7px 9px;
         min-width: 280px;
       }
+      .examples {
+        display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 6px;
+        margin-bottom: 10px;
+      }
+      .chip {
+        border: 1px solid var(--border);
+        background: #f0f4ff;
+        color: var(--primary);
+        border-radius: 999px;
+        padding: 4px 12px;
+        font-size: 12px;
+        font-weight: 500;
+        cursor: pointer;
+        transition: background 0.15s;
+      }
+      .chip:hover { background: #dce8ff; }
+      .input-row {
+        display: flex;
+        gap: 8px;
+        align-items: flex-end;
+      }
+      .input-row textarea {
+        flex: 1;
+        min-height: 52px;
+        resize: none;
+      }
+      .send-btn {
+        flex-shrink: 0;
+        width: 44px;
+        height: 44px;
+        border-radius: 10px;
+        padding: 0;
+        font-size: 16px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
     </style>
   </head>
   <body>
@@ -166,16 +206,23 @@
       <p class="subtitle">Prompt in, warehouse plan out. Minimal UI for local and live testing.</p>
 
       <div class="card">
-        <label class="label" for="prompt">Prompt</label>
-        <textarea id="prompt">Give me reorder recommendations for item number 3000393 across all warehouses. Include weekly projections with forecast, demand, quantity, order, whstock, ststock, and downtime.</textarea>
-        <div class="row">
-          <button id="run" class="primary">Run</button>
-          <button id="toggleAdvanced" class="secondary">Advanced</button>
-          <label class="small"><input type="checkbox" id="wantExplanation" checked /> Include concise explanation</label>
+        <label class="label" for="prompt">Ask anything about core reordering</label>
+        <div class="examples">
+          <span class="small" style="color:var(--muted);margin-right:6px;">Try:</span>
+          <button class="chip" data-q="Give me core reordering for item 3072145">item 3072145</button>
+          <button class="chip" data-q="Give me core reordering for item 3067481">item 3067481</button>
+          <button class="chip" data-q="Give me core reordering for item 3067481, warehouse SE01WH">item 3067481 SE01WH</button>
+        </div>
+        <div class="input-row">
+          <textarea id="prompt" rows="2" placeholder="e.g. Give me core reordering for item 3072145"></textarea>
+          <button id="run" class="primary send-btn" title="Run (Enter)">&#9654;</button>
+        </div>
+        <div class="row" style="margin-top:8px;">
+          <button id="toggleAdvanced" class="secondary" style="font-size:12px;padding:6px 10px;">Settings</button>
         </div>
         <div id="advanced" class="row hidden">
           <label class="small">API Base URL</label>
-          <input id="baseUrl" class="inline-input" value="http://127.0.0.1:8010" />
+          <input id="baseUrl" class="inline-input" value="http://127.0.0.1:18010" />
         </div>
       </div>
 
@@ -339,22 +386,33 @@
         $("advanced").classList.toggle("hidden");
       };
 
-      $("run").onclick = async () => {
+      document.querySelectorAll(".chip").forEach((chip) => {
+        chip.onclick = () => {
+          $("prompt").value = chip.dataset.q;
+          $("prompt").focus();
+        };
+      });
+
+      $("prompt").addEventListener("keydown", (e) => {
+        if (e.key === "Enter" && !e.shiftKey) {
+          e.preventDefault();
+          $("run").click();
+        }
+      });
+
+      async function runQuery() {
         const result = $("result");
         const baseUrl = $("baseUrl").value.trim().replace(/\/+$/, "");
         const promptInput = $("prompt").value.trim();
-        const askExplain = $("wantExplanation").checked;
-        const finalPrompt = askExplain
-          ? `${promptInput}\nAlso include a concise explanation of the output.`
-          : promptInput;
+        if (!promptInput) return;
 
-        result.innerHTML = `<div class="small">Running...</div>`;
+        result.innerHTML = `<div class="small">Running\u2026 (this may take up to a minute)</div>`;
         try {
           const resp = await fetch(`${baseUrl}/api/query`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
-              prompt: finalPrompt,
+              prompt: promptInput,
               store_id: "ALL",
               start_date: null,
               end_date: null,
@@ -393,7 +451,9 @@
             <div class="small">Confirm API is running and base URL is correct.</div>
           `;
         }
-      };
+      }
+
+      $("run").onclick = runQuery;
     </script>
   </body>
 </html>

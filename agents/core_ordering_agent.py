@@ -39,6 +39,15 @@ YOU MUST SIMULATE ALL 53 WEEKS WITHOUT EXCEPTION.
 - Outputting a partial result (e.g. stopping after the first order or after stock
   recovers) is ALWAYS WRONG regardless of what the stock level is.
 
+⚠ MOQ IS NEVER A SKIP CONDITION IN A SINGLE-WAREHOUSE SIMULATION ⚠
+- MOQ (bicache_tbl_Item.MOQ) is an AGGREGATE gate that FPO applies across ALL
+  warehouses combined. A single-warehouse order BELOW MOQ is perfectly valid —
+  other warehouses will bring the group total above MOQ.
+- In this single-warehouse simulation you MUST NEVER drop or skip an order because
+  the per-warehouse quantity is below MOQ.
+- The ONLY reason to skip is: qty rounds down to 0.
+- If qty > 0 but qty < MOQ → PLACE THE ORDER. Do not mention MOQ as a reason to skip.
+
 ════════════════════════════════════════════
 DATA INPUT
 ════════════════════════════════════════════
@@ -47,10 +56,17 @@ Use ONLY data returned by this call.
 
 The response contains:
 
+  store_stockin_by_week — list of {week_index: 1..53, stockin: <float>}
+                        = SUM of CalcStoreStock.StockInWkNN across all stores
+                        = actual units that LEFT the warehouse to stores each week
+                        USE THIS as Demand[n] for the warehouse stock simulation.
+                        Do NOT use demand_by_week (store sales demand) — it overstates
+                        warehouse demand in early weeks when stores served from own stock.
+
   demand_by_week    — list of {week_index: 1..53, demand: <float>}
-                      = SUM of CalcStoreStock.DemandWkNN across all stores (store-requested pulls,
-                        same source FPO uses for RecCumulativeDemand accumulation)
-                      USE THIS directly as Demand[n]. Do NOT sum raw table rows yourself.
+                      = SUM of CalcStoreStock.DemandWkNN (store sales demand — NOT warehouse demand)
+                      DO NOT use this for the warehouse stock simulation or trigger checks.
+                      It is available for reference only.
 
   forecast_by_week  — list of {week_index: 1..53, forecast: <float>}
                       = SUM of ForecastStoreSales.ForecastWkNN across all stores
@@ -100,10 +116,19 @@ WEEK-BY-WEEK SIMULATION
   WhStock[0] = CloseStockWk00  (from fpo_tbl_CalcWarehouseStock)
 
   For each week n = 1..53 (in order, NO EXCEPTIONS, NO EARLY EXIT):
-    Demand[n]   = demand_by_week[n].demand   (always 0 for week 1)
+    Demand[n]   = store_stockin_by_week[n].stockin   (always 0 for week 1)
     NewOrder[n] = rounded_qty if you place an order for delivery in week n, else 0
     WhStock[n]  = WhStock[n-1] + NewOrder[n] - Demand[n]
     (negative WhStock is valid — it is a backorder deficit, do NOT clamp to 0)
+
+  STOCK FORMULA — CRITICAL DETAIL:
+  The formula WhStock[n] = WhStock[n-1] + NewOrder[n] - Demand[n] applies to EVERY week,
+  including weeks where an order arrives. The order ADDS to whatever balance remains;
+  it does NOT reset stock. Demand[n] (from store_stockin_by_week) is ALWAYS subtracted,
+  even in the delivery week.
+  Example: WhStock[22]=0, NewOrder[23]=2964, Demand[23]=300 (stockin value)
+           → WhStock[23] = 0 + 2964 - 300 = 2664   ← correct
+           → WhStock[23] = 2964                      ← WRONG (demand not subtracted)
 
   You MUST process all 53 weeks. There is no condition that ends the loop early.
   Positive stock does NOT end the loop. Reaching week 53 ends the loop.
@@ -123,13 +148,24 @@ CHECK A — Delivery gate (evaluate FIRST, before anything else):
 
 CHECK B — Block window (post-order cooldown):
   If last_order_week > 0 AND (T - last_order_week) < WeeksOfCover → SKIP week T. Continue to T+1.
+  IMPORTANT: "SKIP" means SKIP ORDER PLACEMENT ONLY.
+  You MUST still compute WhStock[T] = WhStock[T-1] + 0 - Demand[T] for every skipped week.
+  Stock KEEPS DEPLETING during the block window — demand is always consumed regardless of whether
+  an order is placed. Never skip the stock update for a blocked week.
+  Example: order at T=23, WeeksOfCover=4, Demand[24]=1272, Demand[25]=552, Demand[26]=216
+    WhStock[24] = WhStock[23] + 0 - 1272   ← demand consumed even though week 24 is blocked
+    WhStock[25] = WhStock[24] + 0 - 552    ← same for week 25
+    WhStock[26] = WhStock[25] + 0 - 216    ← same for week 26
+    Week 27 is first week outside block → evaluate CHECK C using WhStock[26] computed above.
+  After the block window expires, continue evaluating EVERY remaining week independently.
 
 CHECK C — Stock trigger:
-  projected = WhStock[T-1] - Demand[T]
+  projected = WhStock[T-1] - Demand[T]   (Demand[T] = store_stockin_by_week[T].stockin)
   If projected > SafetyStockQty → SKIP week T (stock sufficient). Continue to T+1.
 
 CHECK D — Demand present:
   If Demand[T] == 0 AND Forecast[T] == 0 → SKIP week T. Continue to T+1.
+  (Demand[T] here is store_stockin_by_week[T].stockin; Forecast[T] is forecast_by_week[T].forecast)
 
 CHECK E — Config:
   If ReqPO != 1 → SKIP week T. Continue to T+1.
@@ -164,22 +200,19 @@ PER TRIGGER WEEK T (all checks passed):
    elif OrderQtyType == 'S':
        qty = SOQ                                   # fixed standard order qty
    else:  # 'C' or blank — cover-based (most common)
-       # FPO: RecCumulativeDemand = sum(DemandWkNN over cover weeks) + SafetyStockGap
+       # FPO: RecCumulativeDemand = sum(store_stockin[T..T+WeeksOfCover-1]) + SafetyStockGap
        # SafetyStockGap = SafetyStockQty - CloseStockWk[trigger].
        # In FPO's clean run stock hits exactly SafetyStockQty at trigger → gap ≈ 0.
        # For SafetyStockQty > 0 include the gap; for SafetyStockQty = 0 it is always 0.
        safety_gap = max(0, SafetyStockQty - (WhStock[T-1] - Demand[T])) if SafetyStockQty > 0 else 0
-       base = sum(Demand[T], Demand[T+1], ..., Demand[T+WeeksOfCover-1])
+       base = sum(store_stockin_by_week[T].stockin, ..., store_stockin_by_week[T+WeeksOfCover-1].stockin)
             + safety_gap
             + StoreCartonSize
        qty  = ceil(base / pack) * pack             # round UP to pack unit
 
-   # ── MOQ note ─────────────────────────────────────────────────────────
-   # FPO checks MOQ across ALL warehouses combined (cross-warehouse aggregate),
-   # not per-warehouse. A per-warehouse order below MOQ is still valid if other
-   # warehouses bring the group total above MOQ.
-   # For a single-warehouse simulation: DO NOT skip orders below MOQ.
-   # Only skip if qty rounds down to 0.
+   # ── Skip gate: ONLY if qty == 0 ──────────────────────────────────────
+   # MOQ is a cross-warehouse aggregate — NEVER skip because qty < MOQ.
+   # Skip only if cover-based formula rounds down to exactly 0.
    if qty <= 0:
        SKIP; continue to next week
 
