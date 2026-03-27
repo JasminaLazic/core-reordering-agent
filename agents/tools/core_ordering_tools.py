@@ -87,17 +87,33 @@ def _query_sqlserver(sql: str, params: Optional[List[Any]] = None) -> List[Dict[
     return result
 
 
-def _query(sql: str, params: Optional[List[Any]] = None) -> List[Dict[str, Any]]:
-    return _query_sqlserver(sql, params)
-
-
 def _query_safe(
     sql: str, params: Optional[List[Any]] = None
 ) -> Tuple[List[Dict[str, Any]], Optional[str]]:
     try:
-        return _query(sql, params), None
+        return _query_sqlserver(sql, params), None
     except Exception as e:
         return [], str(e)
+
+
+def _query_item_wh(
+    table: str,
+    item_key: int,
+    wh_key: Optional[int],
+    select: str = "*",
+) -> List[Dict[str, Any]]:
+    """SELECT {select} FROM {table} WHERE ItemKey=? [AND CentralWarehouseKey=?]."""
+    if wh_key is not None:
+        rows, _ = _query_safe(
+            f"SELECT {select} FROM {table} WHERE ItemKey = ? AND CentralWarehouseKey = ?",
+            [item_key, wh_key],
+        )
+    else:
+        rows, _ = _query_safe(
+            f"SELECT {select} FROM {table} WHERE ItemKey = ?",
+            [item_key],
+        )
+    return rows
 
 
 def _normalize_top_n(top_n: int, max_n: int = 500) -> int:
@@ -131,18 +147,28 @@ def _aggregate_weekly_series(
     wh_key: Optional[int],
     value_key: str = "value",
     n_weeks: int = 53,
+    positive_only: bool = False,
 ) -> List[Dict[str, Any]]:
     """
     SELECT SUM(<col_prefix>Wk01)..SUM(<col_prefix>Wk53) FROM <table>
     WHERE ItemKey=? [AND CentralWarehouseKey=?]
 
+    positive_only=True mirrors tvf_StockProjection behaviour:
+      SUM(CASE WHEN col > 0 THEN col ELSE 0 END)
+
     Returns a list of {week_index: n, <value_key>: total} for weeks 1..n_weeks,
     treating NULL as 0.
     """
-    sums = ", ".join(
-        f"COALESCE(SUM({col_prefix}Wk{n:02d}), 0) AS Wk{n:02d}"
-        for n in range(1, n_weeks + 1)
-    )
+    if positive_only:
+        sums = ", ".join(
+            f"COALESCE(SUM(CASE WHEN {col_prefix}Wk{n:02d} > 0 THEN {col_prefix}Wk{n:02d} ELSE 0 END), 0) AS Wk{n:02d}"
+            for n in range(1, n_weeks + 1)
+        )
+    else:
+        sums = ", ".join(
+            f"COALESCE(SUM({col_prefix}Wk{n:02d}), 0) AS Wk{n:02d}"
+            for n in range(1, n_weeks + 1)
+        )
     if wh_key is not None:
         sql = f"SELECT {sums} FROM {table} WHERE ItemKey = ? AND CentralWarehouseKey = ?"
         params: List[Any] = [item_key, wh_key]
@@ -157,6 +183,10 @@ def _aggregate_weekly_series(
         {"week_index": n, value_key: row.get(f"Wk{n:02d}", 0) or 0}
         for n in range(1, n_weeks + 1)
     ]
+
+
+def _week_cols(prefix: str, start: int = 1, end: int = 53) -> str:
+    return ", ".join(f"{prefix}Wk{n:02d}" for n in range(start, end + 1))
 
 
 # ---------------------------------------------------------------------------
@@ -231,56 +261,64 @@ def get_item_ordering_data(
         )
 
     # ItemWarehouse config (ABC class, SafetyStockQty, ReqPO, ShipLT, TotalLT)
-    if wh_key is not None:
-        tables["fpo_tbl_ItemWarehouse"], _ = _query_safe(
-            "SELECT * FROM fpo.tbl_ItemWarehouse WHERE ItemKey = ? AND CentralWarehouseKey = ?",
-            [item_key, wh_key],
-        )
-    else:
-        tables["fpo_tbl_ItemWarehouse"], _ = _query_safe(
-            "SELECT * FROM fpo.tbl_ItemWarehouse WHERE ItemKey = ?", [item_key],
-        )
-
-    # ItemWarehouseOrderQty (AOQ, EOQ, LOQ, SOQ, carton/pallet sizes)
-    if wh_key is not None:
-        tables["fpo_tbl_ItemWarehouseOrderQty"], _ = _query_safe(
-            "SELECT * FROM fpo.tbl_ItemWarehouseOrderQty WHERE ItemKey = ? AND CentralWarehouseKey = ?",
-            [item_key, wh_key],
-        )
-    else:
-        tables["fpo_tbl_ItemWarehouseOrderQty"], _ = _query_safe(
-            "SELECT * FROM fpo.tbl_ItemWarehouseOrderQty WHERE ItemKey = ?", [item_key],
-        )
-
-    # CalcWarehouseStock — all columns (CloseStockWk00..53)
-    cws_params: List[Any] = [item_key]
-    cws_wh_filter = ""
-    if wh_key is not None:
-        cws_wh_filter = " AND CentralWarehouseKey = ?"
-        cws_params.append(wh_key)
-    # StockInWk01..53 intentionally excluded — agent must not read existing POs from here
-    tables["fpo_tbl_CalcWarehouseStock"], _ = _query_safe(
-        f"SELECT ItemKey, CentralWarehouseKey, ReqPO, SafetyStockQty, CloseStockWk00, "
-        f"CalcIterationNo, FinalisedCalcWeekNo "
-        f"FROM fpo.tbl_CalcWarehouseStock WHERE ItemKey = ?{cws_wh_filter}",
-        cws_params,
+    tables["fpo_tbl_ItemWarehouse"] = _query_item_wh(
+        "fpo.tbl_ItemWarehouse", item_key, wh_key
     )
 
-    # NOTE: fpo_tbl_ForecastStoreSales and fpo_tbl_CalcStoreStock (per-store rows) are
-    # intentionally NOT exposed in the main tables dict — they have 40-60 rows × 53 columns
-    # each and cause the agent to use the wrong source. The pre-aggregated demand_by_week,
-    # forecast_by_week and ststock_by_week arrays (added below) replace them entirely.
+    # ItemWarehouseOrderQty (AOQ, EOQ, LOQ, SOQ, carton/pallet sizes)
+    tables["fpo_tbl_ItemWarehouseOrderQty"] = _query_item_wh(
+        "fpo.tbl_ItemWarehouseOrderQty", item_key, wh_key
+    )
 
-    # ItemWarehouseLeadtime (DeliveryDateWk01..53, BlockReasonWk01..53)
+    # CalcWarehouseStock — keep warehouse opening state only; existing POs remain excluded
+    tables["fpo_tbl_CalcWarehouseStock"] = _query_item_wh(
+        "fpo.tbl_CalcWarehouseStock", item_key, wh_key,
+        select="ItemKey, CentralWarehouseKey, ReqPO, SafetyStockQty, CloseStockWk00, "
+               "CalcIterationNo, FinalisedCalcWeekNo",
+    )
+
+    # Expose per-store raw calculation inputs needed for ProductTools-style S2 logic.
+    # Existing warehouse orders are still intentionally excluded from the agent's stock path,
+    # but the agent can now inspect store-level CloseStock/Demand/StockIn/InTransit plus
+    # Forecast/CoverQty when it needs to reason more faithfully about store allocation.
+    calc_store_select = ", ".join([
+        "ItemKey",
+        "StoreKey",
+        "CentralWarehouseKey",
+        "CartonSize",
+        "CloseStockWk00",
+        _week_cols("CloseStock"),
+        _week_cols("Demand"),
+        _week_cols("StockIn"),
+        _week_cols("InTransit"),
+    ])
+    forecast_store_select = ", ".join([
+        "ItemKey",
+        "StoreKey",
+        "CentralWarehouseKey",
+        "ForecastTotal",
+        _week_cols("Forecast"),
+        _week_cols("CoverQty"),
+    ])
+    tables["fpo_tbl_CalcStoreStock"] = _query_item_wh(
+        "fpo.tbl_CalcStoreStock", item_key, wh_key, select=calc_store_select
+    )
+    tables["fpo_tbl_ForecastStoreSales"] = _query_item_wh(
+        "fpo.tbl_ForecastStoreSales", item_key, wh_key, select=forecast_store_select
+    )
     if wh_key is not None:
-        tables["fpo_tbl_ItemWarehouseLeadtime"], _ = _query_safe(
-            "SELECT * FROM fpo.tbl_ItemWarehouseLeadtime WHERE ItemKey = ? AND CentralWarehouseKey = ?",
+        tables["bicache_tbl_Store"], _ = _query_safe(
+            "SELECT DISTINCT s.StoreKey, s.StoreNumber, s.CountryKey, s.PartnerKey, s.StoreStatus "
+            "FROM bicache.tbl_Store s "
+            "JOIN fpo.tbl_CalcStoreStock css ON css.StoreKey = s.StoreKey "
+            "WHERE css.ItemKey = ? AND css.CentralWarehouseKey = ?",
             [item_key, wh_key],
         )
-    else:
-        tables["fpo_tbl_ItemWarehouseLeadtime"], _ = _query_safe(
-            "SELECT * FROM fpo.tbl_ItemWarehouseLeadtime WHERE ItemKey = ?", [item_key],
-        )
+
+    # ItemWarehouseLeadtime (DeliveryDateWk01..53, BlockReasonWk01..53)
+    tables["fpo_tbl_ItemWarehouseLeadtime"] = _query_item_wh(
+        "fpo.tbl_ItemWarehouseLeadtime", item_key, wh_key
+    )
 
     # 53-week calendar from current week
     start_week = _get_current_calc_week_no()
@@ -340,7 +378,8 @@ def get_item_ordering_data(
         "fpo.tbl_ForecastStoreSales", "Forecast", item_key, wh_key, "forecast"
     )
     ststock_by_week = _aggregate_weekly_series(
-        "fpo.tbl_CalcStoreStock", "CloseStock", item_key, wh_key, "ststock"
+        "fpo.tbl_CalcStoreStock", "CloseStock", item_key, wh_key, "ststock",
+        positive_only=True,
     )
 
     result: Dict[str, Any] = {
@@ -354,7 +393,11 @@ def get_item_ordering_data(
         "store_stockin_by_week": store_stockin_by_week,
         "forecast_by_week": forecast_by_week,
         "ststock_by_week": ststock_by_week,
-        "tables": {k: v for k, v in tables.items() if v is not None},
+        "tables": {
+            k: v for k, v in tables.items()
+            if v is not None
+            and k not in ("fpo_tbl_CalcStoreStock", "fpo_tbl_ForecastStoreSales", "bicache_tbl_Store")
+        },
         "counts": {k: len(v or []) for k, v in tables.items()},
     }
     if multi_wh_summary is not None:
