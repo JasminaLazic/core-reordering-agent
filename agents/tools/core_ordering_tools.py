@@ -270,12 +270,22 @@ def get_item_ordering_data(
         "fpo.tbl_ItemWarehouseOrderQty", item_key, wh_key
     )
 
-    # CalcWarehouseStock — keep warehouse opening state only; existing POs remain excluded
+    # CalcWarehouseStock — expose opening stock plus live inbound/block metadata.
+    # We still avoid recommendation/order tables, but these columns reflect the current
+    # pending supply picture that the agent must account for in its own simulation.
     tables["fpo_tbl_CalcWarehouseStock"] = _query_item_wh(
-        "fpo.tbl_CalcWarehouseStock", item_key, wh_key,
-        select="ItemKey, CentralWarehouseKey, ReqPO, SafetyStockQty, CloseStockWk00, "
-               "CalcIterationNo, FinalisedCalcWeekNo",
+        "fpo.tbl_CalcWarehouseStock", item_key, wh_key
     )
+
+    item_rows = tables.get("bicache_tbl_Item") or []
+    origin_country_key = item_rows[0].get("CountryOriginCountryKey") if item_rows else None
+    if origin_country_key is not None:
+        tables["config_tbl_Country"], _ = _query_safe(
+            "SELECT * FROM config.tbl_Country WHERE CountryKey = ?",
+            [origin_country_key],
+        )
+    else:
+        tables["config_tbl_Country"] = []
 
     # Expose per-store raw calculation inputs needed for ProductTools-style S2 logic.
     # Existing warehouse orders are still intentionally excluded from the agent's stock path,
@@ -346,16 +356,20 @@ def get_item_ordering_data(
             "SELECT * FROM fpo.tbl_ImportCoverConfig WHERE WeekOfYear = DATEPART(ISO_WEEK, GETDATE())",
         )
 
-    # Multi-warehouse rollup summary
+    # Multi-warehouse rollup summary for item-level MOQ context.
     multi_wh_summary: Optional[List[Dict[str, Any]]] = None
-    if include_all_warehouses and not central_warehouse_code:
+    if include_all_warehouses or central_warehouse_code:
         mw_rows, _ = _query_safe(
             "SELECT cw.CentralWarehouseCode, cw.CentralWarehouseName, "
-            "cws.CloseStockWk00, iw.CategoryABC, iw.ReqPO, iw.SafetyStockQty "
+            "cws.CloseStockWk00, cws.LatestDeliveryWeek, cws.BlockRecUntilWeekNo, "
+            "iw.CategoryABC, iw.ReqPO, iw.SafetyStockQty, "
+            "oq.OrderQtyType, oq.AOQ, oq.EOQ, oq.LOQ, oq.SOQ "
             "FROM fpo.tbl_CalcWarehouseStock cws "
             "JOIN bicache.tbl_CentralWarehouse cw ON cw.CentralWarehouseKey = cws.CentralWarehouseKey "
             "LEFT JOIN fpo.tbl_ItemWarehouse iw "
             "  ON iw.ItemKey = cws.ItemKey AND iw.CentralWarehouseKey = cws.CentralWarehouseKey "
+            "LEFT JOIN fpo.tbl_ItemWarehouseOrderQty oq "
+            "  ON oq.ItemKey = cws.ItemKey AND oq.CentralWarehouseKey = cws.CentralWarehouseKey "
             "WHERE cws.ItemKey = ?",
             [item_key],
         )
@@ -389,6 +403,8 @@ def get_item_ordering_data(
         "current_calc_week_no": start_week,
         "warehouse_code": central_warehouse_code,
         "orders_excluded": True,
+        "live_inbound_included": True,
+        "recommended_orders_excluded": True,
         "demand_by_week": demand_by_week,
         "store_stockin_by_week": store_stockin_by_week,
         "forecast_by_week": forecast_by_week,

@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 from types import SimpleNamespace
 
 from azure.ai.projects.aio import AIProjectClient
@@ -35,18 +36,28 @@ YOU MUST SIMULATE ALL 53 WEEKS WITHOUT EXCEPTION.
 - After placing an order and updating WhStock, you MUST immediately continue to T+1,
   T+2, ... T=53. DO NOT stop, summarise, or return output early.
 - If you find yourself about to return a response with fewer than 53 rows in
-  weekly_projection, STOP — you have not finished. Continue the simulation.
-- Outputting a partial result (e.g. stopping after the first order or after stock
-  recovers) is ALWAYS WRONG regardless of what the stock level is.
+  weekly_projection, STOP and finish the missing weeks first.
+- Output valid raw JSON only. Every numeric field must be a JSON number literal.
+  NEVER emit expressions such as 12408.0-84.0.
 
-⚠ MOQ IS NEVER A SKIP CONDITION IN A SINGLE-WAREHOUSE SIMULATION ⚠
-- MOQ (bicache_tbl_Item.MOQ) is an AGGREGATE gate that FPO applies across ALL
-  warehouses combined. A single-warehouse order BELOW MOQ is perfectly valid —
-  other warehouses will bring the group total above MOQ.
-- In this single-warehouse simulation you MUST NEVER drop or skip an order because
-  the per-warehouse quantity is below MOQ.
-- The ONLY reason to skip is: qty rounds down to 0.
-- If qty > 0 but qty < MOQ → PLACE THE ORDER. Do not mention MOQ as a reason to skip.
+════════════════════════════════════════════
+LIVE INBOUND VS RECOMMENDED ORDERS
+════════════════════════════════════════════
+- You MUST account for real pending inbound supply that is already reflected in
+  fpo_tbl_CalcWarehouseStock.StockInWk01..53 and LatestDeliveryWeek.
+- You MUST NOT copy or reuse FPO recommendation outputs (rec_* columns, tbl_WarehouseOrder,
+  or any calculated recommendation rows) as the agent's new orders.
+- In short: look at live inbound stock, but make the new recommendation yourself.
+
+════════════════════════════════════════════
+MOQ RULE
+════════════════════════════════════════════
+- MOQ is checked at ITEM level across warehouses, not as a warehouse-local skip gate.
+- Therefore, do NOT skip a warehouse recommendation just because rounded_qty < MOQ.
+- If rounded_qty < MOQ, keep the warehouse recommendation but mark it as
+  "requires_group_validation" unless the quantity already meets MOQ by itself.
+- Never state that MOQ blocks a single-warehouse recommendation unless item-level
+  group evidence in the payload proves it.
 
 ════════════════════════════════════════════
 DATA INPUT
@@ -59,14 +70,12 @@ The response contains:
   store_stockin_by_week — list of {week_index: 1..53, stockin: <float>}
                         = SUM of CalcStoreStock.StockInWkNN across all stores
                         = actual units that LEFT the warehouse to stores each week
-                        USE THIS as Demand[n] for the warehouse stock simulation.
-                        Do NOT use demand_by_week (store sales demand) — it overstates
-                        warehouse demand in early weeks when stores served from own stock.
+                        USE THIS for warehouse stock movement / close-stock simulation.
 
   demand_by_week    — list of {week_index: 1..53, demand: <float>}
-                      = SUM of CalcStoreStock.DemandWkNN (store sales demand — NOT warehouse demand)
-                      DO NOT use this for the warehouse stock simulation or trigger checks.
-                      It is available for reference only.
+                      = SUM of CalcStoreStock.DemandWkNN
+                      = store-requested demand signal used by RecCumulativeDemand
+                      USE THIS for cover-demand sizing of new recommendations.
 
   forecast_by_week  — list of {week_index: 1..53, forecast: <float>}
                       = SUM of ForecastStoreSales.ForecastWkNN across all stores
@@ -77,17 +86,27 @@ The response contains:
 
   tables.fpo_tbl_CalcWarehouseStock  — one row per warehouse
     → CloseStockWk00            = opening warehouse stock (WhStock[0])
-    → StockInWk01..53           = IGNORE — do not use in simulation.
+    → StockInWk01..53           = real live inbound already expected to arrive
+    → LatestDeliveryWeek        = existing pending-supply gate
+    → BlockRecUntilWeekNo       = existing recommendation block gate
+    → CloseStockWk01..53        = DO NOT USE (DB-calculated, not agent-simulated)
 
   tables.fpo_tbl_ItemWarehouse
     → SafetyStockQty, ReqPO, CategoryABC
 
   tables.fpo_tbl_ItemWarehouseOrderQty
-    → OrderQtyType: 'A'=AOQ, 'E'=EOQ, 'L'=LOQ, 'S'=SOQ, 'C'=cover-based (default)
-    → AOQ, EOQ, LOQ, SOQ  (only used when OrderQtyType matches their letter)
-    → Use bicache_tbl_Item for: StoreCartonSize, SupplierCartonSize, PalletSize, MOQ
+    → OrderQtyType: 'A'=AOQ, 'E'=EOQ, 'L'=LOQ, 'S'=SOQ, 'C'=cover-based
+    → AOQ, EOQ, LOQ, SOQ
 
-  tables.fpo_tbl_ItemWarehouseLeadtime  — ONE row with DeliveryDateWk01..53, BlockReasonWk01..53
+  tables.bicache_tbl_Item
+    → StoreCartonSize, SupplierCartonSize, PalletSize, MOQ, CountryOriginCountryKey
+
+  tables.config_tbl_Country
+    → origin-country pallet-order behavior
+    → if the row clearly indicates pallet ordering and PalletSize > 0, use pallet rounding
+
+  tables.fpo_tbl_ItemWarehouseLeadtime  — ONE row with DeliveryDateWk01..53, ReqPostDateWk01..53,
+                                          BlockReasonWk01..53
 
   tables.fpo_tbl_CalcTimelineWeek  — CalcWeekNo → YearAndWeek (CalcWeekNo 1 = current ISO week)
 
@@ -95,147 +114,132 @@ The response contains:
     → Column: NoOfWeeksCoverWarehouseOrder
     → Match on: CentralWarehouseCode + CategoryABC + WeekOfYear
     → Default to 4 if no match found
-    NOTE: fpo_tbl_ConfigWarehouseCover is usually empty; always prefer fpo_tbl_ImportCoverConfig.
+
+  multi_warehouse_summary
+    → lightweight item-level view across warehouses for MOQ context only
 
 DO NOT USE:
-- StockInWk01..53 from fpo_tbl_CalcWarehouseStock (existing POs — excluded by design)
-- CloseStockWk01..53 from fpo_tbl_CalcWarehouseStock (DB-calculated, not agent-simulated)
-- Any "rec_*" columns
-- tbl_WarehouseOrder or any order tables
+- CloseStockWk01..53 from fpo_tbl_CalcWarehouseStock
+- Any rec_* columns
+- tbl_WarehouseOrder or any order tables as recommended output
 
 ════════════════════════════════════════════
 ZERO-FORECAST / NO-DEMAND GUARD
 ════════════════════════════════════════════
-Before simulating, check if forecast_by_week and demand_by_week are ALL zero or empty.
+Before simulating, check if forecast_by_week, demand_by_week, and store_stockin_by_week
+are all zero or empty.
 If total forecast across all 53 weeks == 0:
   Return status "no_demand" with explanation. Do NOT place any orders.
 
 ════════════════════════════════════════════
 WEEK-BY-WEEK SIMULATION
 ════════════════════════════════════════════
-  WhStock[0] = CloseStockWk00  (from fpo_tbl_CalcWarehouseStock)
+WhStock[0] = CloseStockWk00
 
-  For each week n = 1..53 (in order, NO EXCEPTIONS, NO EARLY EXIT):
-    Demand[n]   = store_stockin_by_week[n].stockin   (always 0 for week 1)
-    NewOrder[n] = rounded_qty if you place an order for delivery in week n, else 0
-    WhStock[n]  = WhStock[n-1] + NewOrder[n] - Demand[n]
-    (negative WhStock is valid — it is a backorder deficit, do NOT clamp to 0)
+For each week n = 1..53:
+  ExistingInbound[n] = fpo_tbl_CalcWarehouseStock.StockInWkNN (0 if null/missing)
+  SentToStores[n]    = store_stockin_by_week[n].stockin
+  NewOrder[n]        = qty you place for delivery in week n, else 0
+  WhStock[n]         = WhStock[n-1] + ExistingInbound[n] + NewOrder[n] - SentToStores[n]
+  Negative WhStock is valid. Do NOT clamp to 0.
 
-  STOCK FORMULA — CRITICAL DETAIL:
-  The formula WhStock[n] = WhStock[n-1] + NewOrder[n] - Demand[n] applies to EVERY week,
-  including weeks where an order arrives. The order ADDS to whatever balance remains;
-  it does NOT reset stock. Demand[n] (from store_stockin_by_week) is ALWAYS subtracted,
-  even in the delivery week.
-  Example: WhStock[22]=0, NewOrder[23]=2964, Demand[23]=300 (stockin value)
-           → WhStock[23] = 0 + 2964 - 300 = 2664   ← correct
-           → WhStock[23] = 2964                      ← WRONG (demand not subtracted)
-
-  You MUST process all 53 weeks. There is no condition that ends the loop early.
-  Positive stock does NOT end the loop. Reaching week 53 ends the loop.
+This formula applies EVERY week, including weeks where inbound arrives.
+Inbound adds to remaining balance; it does not reset stock.
 
 ════════════════════════════════════════════
 ORDER TRIGGER — evaluated for EVERY week T = 1..53
 ════════════════════════════════════════════
-For each week T, evaluate ALL checks below IN ORDER.
-STOP and skip to T+1 the moment any check fails.
-After skipping or placing an order, ALWAYS move to T+1. Never exit the loop.
+Evaluate checks in this order. Stop at the first failure and continue to T+1.
 
-CHECK A — Delivery gate (evaluate FIRST, before anything else):
+CHECK A — Delivery gate:
   delivery = fpo_tbl_ItemWarehouseLeadtime.DeliveryDateWk{T:02d}
+  req_post = fpo_tbl_ItemWarehouseLeadtime.ReqPostDateWk{T:02d}
   block    = fpo_tbl_ItemWarehouseLeadtime.BlockReasonWk{T:02d}
-  If delivery is NULL/missing  → SKIP week T (no order). Continue to T+1.
-  If block is NOT NULL         → SKIP week T (no order). Continue to T+1.
+  If delivery is NULL/missing → SKIP week T.
+  If block is NOT NULL        → SKIP week T.
 
-CHECK B — Block window (post-order cooldown):
-  If last_order_week > 0 AND (T - last_order_week) < WeeksOfCover → SKIP week T. Continue to T+1.
-  IMPORTANT: "SKIP" means SKIP ORDER PLACEMENT ONLY.
-  You MUST still compute WhStock[T] = WhStock[T-1] + 0 - Demand[T] for every skipped week.
-  Stock KEEPS DEPLETING during the block window — demand is always consumed regardless of whether
-  an order is placed. Never skip the stock update for a blocked week.
-  Example: order at T=23, WeeksOfCover=4, Demand[24]=1272, Demand[25]=552, Demand[26]=216
-    WhStock[24] = WhStock[23] + 0 - 1272   ← demand consumed even though week 24 is blocked
-    WhStock[25] = WhStock[24] + 0 - 552    ← same for week 25
-    WhStock[26] = WhStock[25] + 0 - 216    ← same for week 26
-    Week 27 is first week outside block → evaluate CHECK C using WhStock[26] computed above.
-  After the block window expires, continue evaluating EVERY remaining week independently.
+CHECK B — Existing pending inbound gate:
+  If LatestDeliveryWeek exists and LatestDeliveryWeek > T → SKIP week T.
 
-CHECK C — Stock trigger:
-  projected = WhStock[T-1] - Demand[T]   (Demand[T] = store_stockin_by_week[T].stockin)
-  If projected > SafetyStockQty → SKIP week T (stock sufficient). Continue to T+1.
+CHECK C — Block gate:
+  If BlockRecUntilWeekNo exists and BlockRecUntilWeekNo >= T → SKIP week T.
+  If local_block_until > 0 and T <= local_block_until      → SKIP week T.
+  "SKIP" means skip ORDER PLACEMENT only. You MUST still update WhStock[T].
 
-CHECK D — Demand present:
-  If Demand[T] == 0 AND Forecast[T] == 0 → SKIP week T. Continue to T+1.
-  (Demand[T] here is store_stockin_by_week[T].stockin; Forecast[T] is forecast_by_week[T].forecast)
+CHECK D — Config gate:
+  If ReqPO != 1          → SKIP week T.
+  If T + WeeksOfCover > 53 → SKIP week T.
 
-CHECK E — Config:
-  If ReqPO != 1 → SKIP week T. Continue to T+1.
-  If T + WeeksOfCover > 53 → SKIP week T. Continue to T+1.
+CHECK E — Stock trigger:
+  projected = WhStock[T-1] + ExistingInbound[T] - SentToStores[T]
+  If projected > SafetyStockQty → SKIP week T.
 
-All checks passed → proceed to ORDER QUANTITY below, then continue to T+1.
+CHECK F — Demand/forecast present:
+  If demand_by_week[T] == 0 AND SentToStores[T] == 0 AND Forecast[T] == 0 → SKIP week T.
+
+All checks passed → calculate quantity and continue to T+1.
 
 ════════════════════════════════════════════
-ORDER QUANTITY — pseudocode, execute literally
+ORDER QUANTITY — execute literally
 ════════════════════════════════════════════
+Read once before the loop:
+  WeeksOfCover = fpo_tbl_ImportCoverConfig.NoOfWeeksCoverWarehouseOrder
+                 (match warehouse+ABC+week; default 4)
+  OrderQtyType = fpo_tbl_ItemWarehouseOrderQty.OrderQtyType
+  AOQ, EOQ, LOQ, SOQ from fpo_tbl_ItemWarehouseOrderQty
+  MOQ from bicache_tbl_Item.MOQ
+  StoreCartonSize, SupplierCartonSize, PalletSize from bicache_tbl_Item
 
-PRE-SIMULATION — read these values ONCE and state them in your explanation:
-   WeeksOfCover  = fpo_tbl_ImportCoverConfig.NoOfWeeksCoverWarehouseOrder
-                   (match warehouse+ABC+week; default 4)
-   OrderQtyType  = fpo_tbl_ItemWarehouseOrderQty.OrderQtyType  ('A','E','L','S', or 'C')
-   AOQ  = fpo_tbl_ItemWarehouseOrderQty.AOQ
-   EOQ  = fpo_tbl_ItemWarehouseOrderQty.EOQ
-   LOQ  = fpo_tbl_ItemWarehouseOrderQty.LOQ
-   SOQ  = fpo_tbl_ItemWarehouseOrderQty.SOQ
-   MOQ  = bicache_tbl_Item.MOQ                   # gate only: skip order if below
-   pack = SupplierCartonSize if > 0 else StoreCartonSize
+For each trigger week T:
+  safety_gap = max(0, SafetyStockQty - projected)
 
-PER TRIGGER WEEK T (all checks passed):
+  if OrderQtyType == 'A':
+      raw_qty = AOQ
+  elif OrderQtyType == 'E':
+      raw_qty = EOQ
+  elif OrderQtyType == 'L':
+      raw_qty = LOQ
+  elif OrderQtyType == 'S':
+      raw_qty = SOQ
+  else:
+      rec_cumulative_demand = sum(demand_by_week[T].demand, ..., demand_by_week[T+WeeksOfCover-1].demand)
+      final_demand = rec_cumulative_demand + safety_gap + StoreCartonSize
+      raw_qty = final_demand
 
-   # ── Determine quantity based on OrderQtyType ─────────────────────────
-   if OrderQtyType == 'A':
-       qty = AOQ                                   # fixed agreed order qty
-   elif OrderQtyType == 'E':
-       qty = EOQ                                   # fixed economic order qty
-   elif OrderQtyType == 'L':
-       qty = LOQ                                   # fixed lot order qty
-   elif OrderQtyType == 'S':
-       qty = SOQ                                   # fixed standard order qty
-   else:  # 'C' or blank — cover-based (most common)
-       # FPO: RecCumulativeDemand = sum(store_stockin[T..T+WeeksOfCover-1]) + SafetyStockGap
-       # SafetyStockGap = SafetyStockQty - CloseStockWk[trigger].
-       # In FPO's clean run stock hits exactly SafetyStockQty at trigger → gap ≈ 0.
-       # For SafetyStockQty > 0 include the gap; for SafetyStockQty = 0 it is always 0.
-       safety_gap = max(0, SafetyStockQty - (WhStock[T-1] - Demand[T])) if SafetyStockQty > 0 else 0
-       base = sum(store_stockin_by_week[T].stockin, ..., store_stockin_by_week[T+WeeksOfCover-1].stockin)
-            + safety_gap
-            + StoreCartonSize
-       qty  = ceil(base / pack) * pack             # round UP to pack unit
+  Determine rounding type in this priority:
+    1. pallet ('P') if config_tbl_Country clearly requires pallet ordering AND PalletSize > 0
+    2. supplier carton ('S') if SupplierCartonSize > 0
+    3. store carton ('C') if StoreCartonSize > 0
+    4. unit ('U') otherwise
 
-   # ── Skip gate: ONLY if qty == 0 ──────────────────────────────────────
-   # MOQ is a cross-warehouse aggregate — NEVER skip because qty < MOQ.
-   # Skip only if cover-based formula rounds down to exactly 0.
-   if qty <= 0:
-       SKIP; continue to next week
+  If rounding type is P/S/C:
+      rounded_qty = ceil(raw_qty / pack_size) * pack_size
+  Else:
+      rounded_qty = ceil(raw_qty)
 
-   # ── Commit ────────────────────────────────────────────────────────────
-   NewOrder[T]     = qty
-   WhStock[T]      = WhStock[T-1] + qty - Demand[T]
-   last_order_week = T
-   # Block T+1 .. T+WeeksOfCover-1 from CHECK B
-   # IMPORTANT: After committing, continue the loop at T+1. Do NOT exit.
+  If rounded_qty <= 0:
+      SKIP week T
+
+  moq_status = "meets_item_moq_alone" if rounded_qty >= MOQ else "requires_group_validation"
+
+  NewOrder[T]        = rounded_qty
+  WhStock[T]         = WhStock[T-1] + ExistingInbound[T] + rounded_qty - SentToStores[T]
+  local_block_until  = T + WeeksOfCover - 1
 
 In the explanation, for every trigger include:
-  "Week T: OrderQtyType={type}, base={base}, pack={pack}, rounded={qty}, MOQ={MOQ} -> PLACE/SKIP"
+  week, projected stock, safety_gap, OrderQtyType, raw_qty, rounding_type, pack_size,
+  rounded_qty, MOQ, moq_status, delivery_date, req_post_date.
 
 ════════════════════════════════════════════
 SELF-CHECK BEFORE RETURNING OUTPUT
 ════════════════════════════════════════════
-Before returning your JSON response, verify ALL of the following:
-  1. weekly_projection contains EXACTLY 53 entries (week_index 1 through 53 inclusive).
-     If it has fewer than 53 entries → DO NOT return yet. Complete the missing weeks first.
-  2. Every week_index from 1 to 53 is present with no gaps.
-  3. whstock values are YOUR simulated values — never copied from DB columns.
-  4. new_order is 0 for non-trigger weeks, and the calculated qty for trigger weeks.
-If any check fails, continue the simulation until all 53 rows are present.
+Before returning, verify ALL of the following:
+  1. weekly_projection contains EXACTLY 53 entries with week_index 1..53.
+  2. Every week_index 1..53 is present with no gaps.
+  3. whstock values are your simulated values only.
+  4. existing_inbound reflects CalcWarehouseStock.StockInWkNN for that week.
+  5. new_order is 0 for non-trigger weeks and rounded_qty for trigger weeks.
+  6. All numbers are valid JSON numbers, not strings or expressions.
 
 ════════════════════════════════════════════
 OUTPUT — raw JSON only, no markdown, no prose
@@ -243,7 +247,7 @@ OUTPUT — raw JSON only, no markdown, no prose
 {
   "status": "ok" | "no_demand" | "error",
   "scope": {"item_number": "str", "item_key": int, "warehouse_code": "str"},
-  "explanation": "Step-by-step: WeeksOfCover used, WhStock[0..N], each trigger check, each order placed or skipped with reason",
+  "explanation": "Step-by-step: WeeksOfCover, LatestDeliveryWeek, block checks, stock trigger, quantity, rounding, MOQ status, all 53 weeks",
   "recommendations": [
     {
       "item_key": int,
@@ -251,8 +255,11 @@ OUTPUT — raw JSON only, no markdown, no prose
       "warehouse_code": "str",
       "rec_order_week": int,
       "delivery_date": "YYYY-MM-DD",
+      "req_post_date": "YYYY-MM-DD" | null,
       "order_qty": int,
       "weeks_cover": int,
+      "rounding_type": "P" | "S" | "C" | "U",
+      "moq_status": "meets_item_moq_alone" | "requires_group_validation",
       "reasoning": "str"
     }
   ],
@@ -265,6 +272,7 @@ OUTPUT — raw JSON only, no markdown, no prose
           "year_week": "str",
           "forecast": float,
           "demand": float,
+          "existing_inbound": float,
           "new_order": float,
           "whstock": float,
           "ststock": float
@@ -275,10 +283,9 @@ OUTPUT — raw JSON only, no markdown, no prose
 }
 
 RULES:
-- warehouse_views MUST show all 53 weeks. A response with fewer than 53 rows is invalid.
-- whstock = YOUR computed value. Never copy from any DB column.
-- new_order[n] = qty you place for delivery in week n, else 0.
-- ALWAYS explain trigger/gate decisions including skipped orders.
+- warehouse_views MUST show all 53 weeks.
+- demand in weekly_projection MUST be store_stockin_by_week stock movement, not store-sales demand.
+- Use demand_by_week for cover sizing, and store_stockin_by_week for warehouse stock movement.
 - Do NOT confuse CalcWeekNo (1..53) with YearAndWeek (YYYYWW).
 - "Danish warehouse" means DK01WH.
 """
@@ -437,22 +444,27 @@ async def get_core_ordering_agent() -> Agent:
         raise RuntimeError("Missing CORE_ORDERING_AGENT_ID in .env (create the agent once first).")
 
     _patch_ai_projects_agents_compat()
-    async with get_azure_credential() as credential:
-        resolved_agent_id = await _resolve_agent_id_if_needed(CORE_ORDERING_AGENT_ID, credential)
-        chat_client = CompatAzureAIAgentClient(
-            project_endpoint=AI_FOUNDRY_PROJECT_ENDPOINT,
-            async_credential=credential,
-            agent_id=resolved_agent_id,
-            model_deployment_name=MODEL_DEPLOYMENT_NAME,
-        )
-        tools = [
-            get_item_ordering_data,
-            get_fpo_source_table,
-        ]
-        return Agent(
-            chat_client=chat_client,
-            tools=tools,
-        )
+    credential = get_azure_credential()
+    resolved_agent_id = await _resolve_agent_id_if_needed(CORE_ORDERING_AGENT_ID, credential)
+    chat_client = CompatAzureAIAgentClient(
+        project_endpoint=AI_FOUNDRY_PROJECT_ENDPOINT,
+        async_credential=credential,
+        agent_id=resolved_agent_id,
+        model_deployment_name=MODEL_DEPLOYMENT_NAME,
+    )
+    tools = [
+        get_item_ordering_data,
+        get_fpo_source_table,
+    ]
+    agent_kwargs = {"tools": tools}
+    init_params = inspect.signature(Agent).parameters
+    if "chat_client" in init_params:
+        agent_kwargs["chat_client"] = chat_client
+    else:
+        agent_kwargs["client"] = chat_client
+    agent = Agent(**agent_kwargs)
+    setattr(agent, "_credential", credential)
+    return agent
 
 
 async def create_core_ordering_agent() -> str:

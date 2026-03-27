@@ -6,255 +6,655 @@
     <title>Core Reordering Assistant</title>
     <style>
       :root {
-        --bg: #f4f6fb;
+        --bg: #eef2ff;
+        --panel: rgba(255, 255, 255, 0.82);
         --card: #ffffff;
-        --text: #1f2937;
-        --muted: #6b7280;
-        --border: #dbe2ef;
-        --primary: #1565c0;
-        --primary-2: #0d47a1;
-        --ok: #1b5e20;
-        --warn: #ef6c00;
+        --card-soft: #f8faff;
+        --text: #0f172a;
+        --muted: #64748b;
+        --border: rgba(148, 163, 184, 0.28);
+        --primary: #2563eb;
+        --primary-strong: #1d4ed8;
+        --primary-soft: #e8f0ff;
+        --ok: #166534;
+        --ok-bg: #eefbf2;
+        --warn: #b45309;
+        --warn-bg: #fff7ed;
+        --shadow: 0 24px 60px rgba(15, 23, 42, 0.12);
       }
-      * { box-sizing: border-box; }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html, body {
+        height: 100%;
+      }
+
       body {
         margin: 0;
         font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
         color: var(--text);
-        background: var(--bg);
+        background:
+          radial-gradient(circle at top left, rgba(37, 99, 235, 0.14), transparent 32%),
+          linear-gradient(180deg, #f8fbff 0%, #eef2ff 100%);
       }
-      .container {
-        max-width: 1100px;
-        margin: 32px auto;
-        padding: 0 16px;
-      }
-      .title {
-        font-size: 28px;
-        font-weight: 700;
-        margin: 0 0 6px;
-      }
-      .subtitle {
-        margin: 0 0 20px;
-        color: var(--muted);
-      }
-      .card {
-        background: var(--card);
-        border: 1px solid var(--border);
-        border-radius: 14px;
-        padding: 18px;
-        box-shadow: 0 2px 8px rgba(15, 23, 42, 0.04);
-      }
-      .label {
-        display: block;
-        font-size: 13px;
-        font-weight: 600;
-        margin-bottom: 8px;
-      }
-      textarea, input, select, button {
+
+      button, textarea, input {
         font: inherit;
       }
-      textarea {
-        width: 100%;
-        min-height: 130px;
-        border: 1px solid var(--border);
-        border-radius: 10px;
-        padding: 12px;
-        resize: vertical;
-        background: #fff;
-      }
-      textarea:focus, input:focus, select:focus {
-        outline: 2px solid #bbdefb;
-        border-color: #90caf9;
-      }
-      .row {
-        display: flex;
-        gap: 10px;
-        align-items: center;
-        flex-wrap: wrap;
-        margin-top: 12px;
-      }
-      button.primary {
-        border: 0;
-        color: #fff;
-        background: var(--primary);
-        border-radius: 10px;
-        padding: 10px 16px;
-        font-weight: 600;
+
+      button {
         cursor: pointer;
       }
-      button.primary:hover { background: var(--primary-2); }
-      button.secondary {
+
+      .hidden {
+        display: none;
+      }
+
+      .app-shell {
+        max-width: 1040px;
+        min-height: 100%;
+        margin: 0 auto;
+        padding: 24px 16px;
+      }
+
+      .topbar {
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-start;
+        gap: 16px;
+        margin-bottom: 18px;
+      }
+
+      .title {
+        margin: 0;
+        font-size: 30px;
+        font-weight: 700;
+        letter-spacing: -0.03em;
+      }
+
+      .subtitle {
+        margin: 6px 0 0;
+        color: var(--muted);
+        font-size: 14px;
+      }
+
+      .topbar-actions {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+
+      .ghost-btn,
+      .secondary-btn,
+      .primary-btn {
+        border-radius: 999px;
         border: 1px solid var(--border);
+        padding: 10px 14px;
+        background: rgba(255, 255, 255, 0.8);
+        color: var(--text);
+        transition: 0.18s ease;
+      }
+
+      .ghost-btn:hover,
+      .secondary-btn:hover {
+        background: #ffffff;
+        border-color: rgba(37, 99, 235, 0.22);
+      }
+
+      .primary-btn {
+        background: linear-gradient(180deg, var(--primary), var(--primary-strong));
+        color: #fff;
+        border-color: transparent;
+        box-shadow: 0 10px 20px rgba(37, 99, 235, 0.24);
+      }
+
+      .primary-btn:hover {
+        transform: translateY(-1px);
+      }
+
+      .chat-panel {
+        display: flex;
+        flex-direction: column;
+        min-height: calc(100vh - 110px);
+        background: var(--panel);
+        backdrop-filter: blur(18px);
+        border: 1px solid rgba(255, 255, 255, 0.65);
+        border-radius: 28px;
+        box-shadow: var(--shadow);
+        overflow: hidden;
+      }
+
+      .thread {
+        flex: 1;
+        padding: 28px 24px 18px;
+        overflow-y: auto;
+      }
+
+      .thread-list {
+        display: flex;
+        flex-direction: column;
+        gap: 18px;
+      }
+
+      .empty-state {
+        max-width: 720px;
+        margin: 48px auto;
+        text-align: center;
+      }
+
+      .empty-state h2 {
+        margin: 0 0 10px;
+        font-size: 32px;
+        letter-spacing: -0.03em;
+      }
+
+      .empty-state p {
+        margin: 0;
+        color: var(--muted);
+        line-height: 1.6;
+      }
+
+      .starter-section {
+        margin-top: 22px;
+        text-align: left;
+      }
+
+      .section-label {
+        margin-bottom: 10px;
+        font-size: 12px;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--muted);
+      }
+
+      .chips {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+      }
+
+      .chip {
+        border: 1px solid rgba(37, 99, 235, 0.15);
         background: #fff;
         color: var(--text);
-        border-radius: 10px;
-        padding: 10px 14px;
-        cursor: pointer;
+        border-radius: 18px;
+        padding: 12px 14px;
+        min-height: 46px;
+        text-align: left;
       }
+
+      .chip:hover {
+        background: var(--primary-soft);
+        border-color: rgba(37, 99, 235, 0.3);
+      }
+
+      .chip strong {
+        display: block;
+        font-size: 14px;
+        margin-bottom: 2px;
+      }
+
+      .chip span {
+        display: block;
+        font-size: 12px;
+        color: var(--muted);
+      }
+
+      .message-row {
+        display: flex;
+      }
+
+      .message-row.user {
+        justify-content: flex-end;
+      }
+
+      .message-row.assistant {
+        justify-content: flex-start;
+      }
+
+      .message {
+        width: min(100%, 860px);
+      }
+
+      .message.user {
+        max-width: min(80%, 720px);
+      }
+
+      .message-label {
+        margin-bottom: 8px;
+        font-size: 12px;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        color: var(--muted);
+      }
+
+      .bubble {
+        border: 1px solid var(--border);
+        border-radius: 22px;
+        padding: 16px;
+        background: var(--card);
+      }
+
+      .message.user .bubble {
+        background: linear-gradient(180deg, #2f6df6, #2459d6);
+        color: #fff;
+        border-color: transparent;
+        border-bottom-right-radius: 8px;
+        box-shadow: 0 12px 28px rgba(37, 99, 235, 0.24);
+      }
+
+      .message.assistant .bubble {
+        border-bottom-left-radius: 8px;
+      }
+
+      .assistant-summary {
+        margin-bottom: 14px;
+        line-height: 1.55;
+      }
+
+      .assistant-text {
+        line-height: 1.65;
+        white-space: pre-wrap;
+      }
+
+      .status {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        margin-bottom: 12px;
+        padding: 6px 10px;
+        border-radius: 999px;
+        border: 1px solid var(--border);
+        font-size: 12px;
+        font-weight: 600;
+      }
+
+      .status.ok {
+        color: var(--ok);
+        background: var(--ok-bg);
+      }
+
+      .status.warn {
+        color: var(--warn);
+        background: var(--warn-bg);
+      }
+
+      .summary-card {
+        margin-bottom: 14px;
+        padding: 14px;
+        background: var(--card-soft);
+        border: 1px solid var(--border);
+        border-radius: 16px;
+      }
+
+      .summary-card.error {
+        background: var(--warn-bg);
+      }
+
+      .error-card {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+      }
+
+      .error-title {
+        font-size: 15px;
+        font-weight: 700;
+        color: #9a3412;
+      }
+
+      .error-detail {
+        line-height: 1.6;
+      }
+
+      .error-hint {
+        padding: 12px 14px;
+        border: 1px solid rgba(180, 83, 9, 0.18);
+        border-radius: 14px;
+        background: rgba(255, 255, 255, 0.72);
+        line-height: 1.55;
+      }
+
+      .section-title {
+        margin: 16px 0 8px;
+        font-size: 14px;
+        font-weight: 700;
+      }
+
       .small {
         font-size: 12px;
         color: var(--muted);
       }
-      .result {
-        margin-top: 16px;
-      }
-      .status {
-        display: inline-block;
-        font-size: 12px;
-        padding: 4px 9px;
-        border-radius: 999px;
+
+      .table-wrap {
+        overflow: auto;
         border: 1px solid var(--border);
-        margin-bottom: 10px;
+        border-radius: 16px;
+        background: #fff;
       }
-      .status.ok { color: var(--ok); border-color: #b7dfbc; background: #eef9ef; }
-      .status.warn { color: var(--warn); border-color: #ffd5b1; background: #fff5ea; }
-      .explain {
-        margin: 10px 0 14px;
-        padding: 12px;
-        border: 1px solid var(--border);
-        border-radius: 10px;
-        background: #fbfcff;
-      }
-      .warehouse-bar {
-        display: flex;
-        gap: 10px;
-        align-items: center;
-        margin: 10px 0;
-      }
+
       table {
         width: 100%;
         border-collapse: collapse;
         font-size: 13px;
       }
+
       th, td {
-        border: 1px solid var(--border);
-        padding: 8px;
+        padding: 10px 12px;
+        border-bottom: 1px solid rgba(148, 163, 184, 0.18);
         text-align: left;
+        vertical-align: top;
       }
+
       th {
-        background: #f8faff;
         position: sticky;
         top: 0;
+        background: #f8fbff;
+        z-index: 1;
       }
-      .table-wrap {
-        overflow: visible;
-        border: 1px solid var(--border);
-        border-radius: 10px;
+
+      tr:last-child td {
+        border-bottom: 0;
       }
+
+      details {
+        margin-top: 14px;
+      }
+
+      summary {
+        cursor: pointer;
+      }
+
       pre {
-        margin: 0;
+        margin: 10px 0 0;
+        padding: 14px;
+        border-radius: 16px;
         background: #0f172a;
         color: #e2e8f0;
-        border-radius: 10px;
-        padding: 12px;
         overflow: auto;
-        max-height: 300px;
+        max-height: 320px;
         font-size: 12px;
       }
-      .hidden { display: none; }
-      .inline-input {
-        border: 1px solid var(--border);
-        border-radius: 8px;
-        padding: 7px 9px;
-        min-width: 280px;
-      }
-      .examples {
-        display: flex;
-        align-items: center;
-        flex-wrap: wrap;
+
+      .thinking {
+        display: inline-flex;
         gap: 6px;
-        margin-bottom: 10px;
+        align-items: center;
+        color: var(--muted);
       }
-      .chip {
-        border: 1px solid var(--border);
-        background: #f0f4ff;
-        color: var(--primary);
-        border-radius: 999px;
-        padding: 4px 12px;
-        font-size: 12px;
-        font-weight: 500;
-        cursor: pointer;
-        transition: background 0.15s;
+
+      .thinking-dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: #94a3b8;
+        animation: pulse 1.2s infinite ease-in-out;
       }
-      .chip:hover { background: #dce8ff; }
-      .input-row {
+
+      .thinking-dot:nth-child(2) {
+        animation-delay: 0.15s;
+      }
+
+      .thinking-dot:nth-child(3) {
+        animation-delay: 0.3s;
+      }
+
+      @keyframes pulse {
+        0%, 80%, 100% { transform: scale(0.75); opacity: 0.4; }
+        40% { transform: scale(1); opacity: 1; }
+      }
+
+      .composer-shell {
+        border-top: 1px solid rgba(148, 163, 184, 0.18);
+        padding: 16px;
+        background: rgba(255, 255, 255, 0.72);
+        backdrop-filter: blur(12px);
+      }
+
+      .composer {
         display: flex;
-        gap: 8px;
+        gap: 12px;
         align-items: flex-end;
+        padding: 12px;
+        background: rgba(255, 255, 255, 0.96);
+        border: 1px solid rgba(148, 163, 184, 0.22);
+        border-radius: 24px;
+        box-shadow: 0 10px 30px rgba(15, 23, 42, 0.06);
       }
-      .input-row textarea {
-        flex: 1;
-        min-height: 52px;
+
+      .composer textarea,
+      .utility-panel input {
+        width: 100%;
+        border: 0;
+        outline: none;
+        background: transparent;
+        color: var(--text);
+      }
+
+      .composer textarea {
+        min-height: 28px;
+        max-height: 180px;
         resize: none;
+        padding: 8px 6px;
+        line-height: 1.5;
       }
+
       .send-btn {
-        flex-shrink: 0;
-        width: 44px;
-        height: 44px;
-        border-radius: 10px;
+        width: 48px;
+        height: 48px;
         padding: 0;
-        font-size: 16px;
-        display: flex;
+        border-radius: 16px;
+        display: inline-flex;
         align-items: center;
         justify-content: center;
+        font-size: 16px;
+      }
+
+      .composer-meta {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 12px;
+        margin-top: 12px;
+        flex-wrap: wrap;
+      }
+
+      .composer-actions {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+
+      .text-btn {
+        border: 0;
+        padding: 0;
+        background: transparent;
+        color: var(--primary);
+      }
+
+      .utility-panel {
+        margin-top: 12px;
+        padding: 14px;
+        border-radius: 18px;
+        border: 1px solid var(--border);
+        background: rgba(248, 250, 252, 0.95);
+      }
+
+      .utility-grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 10px;
+      }
+
+      .field {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+
+      .field-label {
+        font-size: 12px;
+        color: var(--muted);
+      }
+
+      .field-input {
+        min-height: 42px;
+        padding: 10px 12px;
+        border: 1px solid rgba(148, 163, 184, 0.3);
+        border-radius: 14px;
+        background: #fff;
+      }
+
+      .utility-actions {
+        display: flex;
+        gap: 10px;
+        margin-top: 12px;
+        flex-wrap: wrap;
+      }
+
+      @media (max-width: 760px) {
+        .app-shell {
+          padding: 14px;
+        }
+
+        .topbar {
+          flex-direction: column;
+        }
+
+        .chat-panel {
+          min-height: calc(100vh - 28px);
+          border-radius: 24px;
+        }
+
+        .thread {
+          padding: 20px 14px 14px;
+        }
+
+        .message.user {
+          max-width: 100%;
+        }
+
+        .utility-grid {
+          grid-template-columns: 1fr;
+        }
+
+        .composer-meta {
+          align-items: flex-start;
+        }
       }
     </style>
   </head>
   <body>
-    <div class="container">
-      <h1 class="title">Core Reordering Assistant</h1>
-      <p class="subtitle">Prompt in, warehouse plan out. Minimal UI for local and live testing.</p>
+    <div class="app-shell">
+      <header class="topbar">
+        <div>
+          <h1 class="title">Core Reordering Assistant</h1>
+          <p class="subtitle">Ask for a reorder plan, keep the answer on screen, and continue with follow-up questions in the same thread.</p>
+        </div>
+        <div class="topbar-actions">
+          <button id="newChat" class="ghost-btn">New chat</button>
+          <button id="toggleSettings" class="ghost-btn">Settings</button>
+        </div>
+      </header>
 
-      <div class="card">
-        <label class="label" for="prompt">Ask anything about core reordering</label>
-        <div class="examples">
-          <span class="small" style="color:var(--muted);margin-right:6px;">Try:</span>
-          <button class="chip" data-q="Give me core reordering for item 3072145">item 3072145</button>
-          <button class="chip" data-q="Give me core reordering for item 3067481">item 3067481</button>
-          <button class="chip" data-q="Give me core reordering for item 3067481, warehouse SE01WH">item 3067481 SE01WH</button>
-        </div>
-        <div class="input-row">
-          <textarea id="prompt" rows="2" placeholder="e.g. Give me core reordering for item 3072145"></textarea>
-          <button id="run" class="primary send-btn" title="Run (Enter)">&#9654;</button>
-        </div>
-        <div class="row" style="margin-top:8px;">
-          <button id="toggleAdvanced" class="secondary" style="font-size:12px;padding:6px 10px;">Settings</button>
-        </div>
-        <div id="advanced" class="row hidden">
-          <label class="small">API Base URL</label>
-          <input id="baseUrl" class="inline-input" value="http://127.0.0.1:18010" />
-        </div>
-      </div>
+      <section class="chat-panel">
+        <div id="thread" class="thread"></div>
 
-      <div id="result" class="card result">
-        <div class="small">Ready.</div>
-      </div>
+        <div class="composer-shell">
+          <div class="composer">
+            <textarea id="prompt" rows="1" placeholder="Ask about an item, warehouse, or follow-up on the current result..."></textarea>
+            <button id="run" class="primary-btn send-btn" title="Send (Enter)">&#10148;</button>
+          </div>
+
+          <div class="composer-meta">
+            <div id="chatMeta" class="small">Start with an item question, then keep asking follow-ups below.</div>
+            <div class="composer-actions">
+              <button id="toggleExact" class="text-btn" type="button">Exact simulation</button>
+            </div>
+          </div>
+
+          <div id="exactPanel" class="utility-panel hidden">
+            <div class="section-label">Exact Simulation</div>
+            <div class="utility-grid">
+              <label class="field">
+                <span class="field-label">Item number</span>
+                <input id="itemNumber" class="field-input" placeholder="e.g. 3064585" />
+              </label>
+              <label class="field">
+                <span class="field-label">Warehouse</span>
+                <input id="warehouseCode" class="field-input" value="DK01WH" />
+              </label>
+              <div class="field">
+                <span class="field-label">Quick picks</span>
+                <div class="chips">
+                  <button class="chip" type="button" data-item="3072145" data-wh="DK01WH">
+                    <strong>3072145</strong>
+                    <span>DK01WH exact run</span>
+                  </button>
+                  <button class="chip" type="button" data-item="3067481" data-wh="DK01WH">
+                    <strong>3067481</strong>
+                    <span>DK01WH exact run</span>
+                  </button>
+                  <button class="chip" type="button" data-item="3067481" data-wh="SE01WH">
+                    <strong>3067481</strong>
+                    <span>SE01WH exact run</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+            <div class="utility-actions">
+              <button id="runExact" class="secondary-btn" type="button">Run exact simulation</button>
+            </div>
+          </div>
+
+          <div id="settingsPanel" class="utility-panel hidden">
+            <div class="section-label">Connection</div>
+            <label class="field">
+              <span class="field-label">API base URL</span>
+              <input id="baseUrl" class="field-input" value="http://127.0.0.1:18010" />
+            </label>
+          </div>
+        </div>
+      </section>
     </div>
 
     <script>
+      let currentConversationId = null;
+      let conversationTurns = [];
+      let isSubmitting = false;
+
       function $(id) { return document.getElementById(id); }
+
       function esc(v) {
         return String(v ?? "").replace(/[&<>"']/g, (c) => ({
-          "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;"
+          "&": "&amp;",
+          "<": "&lt;",
+          ">": "&gt;",
+          "\"": "&quot;",
+          "'": "&#39;",
         }[c]));
       }
+
       function fmt(v) {
         const n = Number(v);
         if (!Number.isFinite(n)) return "-";
         if (Math.abs(n - Math.round(n)) < 1e-9) return String(Math.round(n));
         return n.toFixed(3).replace(/\.?0+$/, "");
       }
+
       function toJsonOrNull(s) {
         if (typeof s !== "string") return null;
         try { return JSON.parse(s); } catch (_) {}
 
-        // Try markdown fenced JSON block first.
         const fenced = s.match(/```(?:json)?\s*([\s\S]*?)```/i);
         if (fenced && fenced[1]) {
           try { return JSON.parse(fenced[1].trim()); } catch (_) {}
         }
 
-        // Fallback: parse the largest {...} segment.
         const first = s.indexOf("{");
         const last = s.lastIndexOf("}");
         if (first >= 0 && last > first) {
@@ -262,6 +662,7 @@
         }
         return null;
       }
+
       function summarize(core) {
         if (core?.explanation && String(core.explanation).trim()) {
           return String(core.explanation).trim();
@@ -278,6 +679,72 @@
         }
         return "No structured recommendations available.";
       }
+
+      function extractItemNumber(text) {
+        const match = String(text || "").match(/\b(\d{6,})\b/);
+        return match ? match[1] : null;
+      }
+
+      function extractWarehouseCode(text) {
+        const match = String(text || "").match(/\b([A-Za-z]{2}\d{2}WH)\b/i);
+        return match ? match[1].toUpperCase() : null;
+      }
+
+      function shouldUseFreshSimulationRequest(message) {
+        const text = String(message || "").trim();
+        const lowered = text.toLowerCase();
+        const itemNumber = extractItemNumber(text);
+        if (!itemNumber) return false;
+
+        return (
+          lowered.includes("rerun") ||
+          lowered.includes("re-run") ||
+          lowered.includes("core reordering") ||
+          lowered.includes("core ordering") ||
+          lowered.includes("exact") ||
+          lowered.includes("simulate") ||
+          lowered.includes("simulation") ||
+          lowered.includes("item ")
+        );
+      }
+
+      function buildFreshSimulationPrompt(message) {
+        const text = String(message || "").trim();
+        const itemNumber = extractItemNumber(text);
+        const warehouseCode = extractWarehouseCode(text) || "DK01WH";
+        if (!itemNumber) {
+          return text;
+        }
+        return `Call get_item_ordering_data(item_number='${itemNumber}', central_warehouse_code='${warehouseCode}') and run the full core reordering simulation.`;
+      }
+
+      function autoResizePrompt() {
+        const prompt = $("prompt");
+        prompt.style.height = "auto";
+        prompt.style.height = `${Math.min(prompt.scrollHeight, 180)}px`;
+      }
+
+      function scrollThreadToBottom() {
+        const thread = $("thread");
+        thread.scrollTop = thread.scrollHeight;
+      }
+
+      function setSubmitting(nextState) {
+        isSubmitting = nextState;
+        $("run").disabled = nextState;
+        $("runExact").disabled = nextState;
+        $("prompt").disabled = nextState;
+      }
+
+      function renderConversationMeta() {
+        $("chatMeta").textContent = currentConversationId
+          ? "Follow-up mode is active. Ask about the current result and the thread will stay intact."
+          : "Start with an item question, then keep asking follow-ups below.";
+        $("prompt").placeholder = currentConversationId
+          ? "Ask a follow-up about the current result..."
+          : "Ask about an item, warehouse, or reorder scenario...";
+      }
+
       function renderRecommendations(recs) {
         if (!recs || !recs.length) return "";
         const rows = recs.map((r) => `
@@ -291,72 +758,77 @@
           </tr>
         `).join("");
         return `
-          <h3 style="margin:14px 0 8px;font-size:15px;">Recommendations</h3>
+          <div class="section-title">Recommendations</div>
           <div class="table-wrap">
             <table>
-              <thead><tr>
-                <th>Warehouse</th><th>Order Week</th><th>Delivery Date</th>
-                <th>Order Qty</th><th>Weeks Cover</th><th>Reasoning</th>
-              </tr></thead>
+              <thead>
+                <tr>
+                  <th>Warehouse</th>
+                  <th>Order Week</th>
+                  <th>Delivery Date</th>
+                  <th>Order Qty</th>
+                  <th>Weeks Cover</th>
+                  <th>Reasoning</th>
+                </tr>
+              </thead>
               <tbody>${rows}</tbody>
             </table>
           </div>
         `;
       }
-      function renderCoreTable(core, rawResponse) {
-        const result = $("result");
-        const views = Array.isArray(core?.warehouse_views) ? core.warehouse_views : [];
-        const recs = Array.isArray(core?.recommendations) ? core.recommendations : [];
-        const explanation = summarize(core);
 
-        if (!views.length && !recs.length) {
-          result.innerHTML = `
-            <div class="status warn">No structured data</div>
-            <div class="explain">${esc(explanation)}</div>
-            <pre>${esc(rawResponse)}</pre>
-          `;
-          return;
-        }
-
-        const recsHtml = renderRecommendations(recs);
-        const options = views.map((v, i) => `<option value="${i}">${esc(v.warehouse_code || `W${i + 1}`)}</option>`).join("");
-        const warehouseSelector = views.length
-          ? `<div class="warehouse-bar">
-               <label class="small" for="warehouseSelect">Warehouse weekly view</label>
-               <select id="warehouseSelect">${options}</select>
-             </div>`
-          : "";
-
-        result.innerHTML = `
-          <div class="status ok">Structured response</div>
-          <div class="explain">${esc(explanation)}</div>
-          ${recsHtml}
-          ${warehouseSelector}
-          <div id="tableHost"></div>
-          <details style="margin-top:12px">
-            <summary class="small">Raw response</summary>
-            <pre>${esc(rawResponse)}</pre>
-          </details>
+      function renderExactCsvRows(rows) {
+        if (!rows || !rows.length) return "";
+        const body = rows.map((r) => `
+          <tr>
+            <td>${esc(r.warehouse_code || "-")}</td>
+            <td>${esc(r.year_week || r.week_index || "-")}</td>
+            <td>${esc(fmt(r.forecast))}</td>
+            <td>${esc(fmt(r.demand))}</td>
+            <td>${esc(fmt(r.existing_inbound))}</td>
+            <td>${esc(fmt(r.new_order))}</td>
+            <td>${esc(fmt(r.whstock))}</td>
+            <td>${esc(fmt(r.ststock))}</td>
+          </tr>
+        `).join("");
+        return `
+          <div class="section-title">Exact Simulation Rows</div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Warehouse</th>
+                  <th>Week</th>
+                  <th>Forecast</th>
+                  <th>Demand</th>
+                  <th>Existing Inbound</th>
+                  <th>New Order</th>
+                  <th>WhStock</th>
+                  <th>StStock</th>
+                </tr>
+              </thead>
+              <tbody>${body}</tbody>
+            </table>
+          </div>
         `;
+      }
 
-        if (!views.length) return;
-        const host = $("tableHost");
-        const select = $("warehouseSelect");
-        function renderWarehouse(index) {
-          const view = views[index] || views[0];
-          const rows = (view.weekly_projection || []).map((r) => `
-            <tr>
-              <td>${esc(r.year_week || `W${String((r.week_index ?? 0)).padStart(2, "0")}`)}</td>
-              <td>${esc(fmt(r.forecast))}</td>
-              <td>${esc(fmt(r.demand))}</td>
-              <td>${esc(fmt(r.quantity))}</td>
-              <td>${esc(fmt(r.order))}</td>
-              <td>${esc(fmt(r.whstock))}</td>
-              <td>${esc(fmt(r.ststock))}</td>
-              <td>${esc(r.downtime || "-")}</td>
-            </tr>
-          `).join("");
-          host.innerHTML = `
+      function renderStaticWarehouseView(view) {
+        const rows = (view?.weekly_projection || []).map((r) => `
+          <tr>
+            <td>${esc(r.year_week || `W${String((r.week_index ?? 0)).padStart(2, "0")}`)}</td>
+            <td>${esc(fmt(r.forecast))}</td>
+            <td>${esc(fmt(r.demand))}</td>
+            <td>${esc(fmt(r.existing_inbound ?? r.quantity))}</td>
+            <td>${esc(fmt(r.new_order ?? r.order))}</td>
+            <td>${esc(fmt(r.whstock))}</td>
+            <td>${esc(fmt(r.ststock))}</td>
+            <td>${esc(r.downtime || "-")}</td>
+          </tr>
+        `).join("");
+        return `
+          <div>
+            <div class="section-title">Warehouse ${esc(view?.warehouse_code || "-")}</div>
             <div class="table-wrap">
               <table>
                 <thead>
@@ -364,96 +836,410 @@
                     <th>Week</th>
                     <th>Forecast</th>
                     <th>Demand</th>
-                    <th>Quantity</th>
-                    <th>Order</th>
+                    <th>Existing Inbound</th>
+                    <th>New Order</th>
                     <th>WhStock</th>
                     <th>StStock</th>
                     <th>Downtime</th>
                   </tr>
                 </thead>
-                <tbody>
-                  ${rows || `<tr><td colspan="8">No weekly rows.</td></tr>`}
-                </tbody>
+                <tbody>${rows || `<tr><td colspan="8">No weekly rows.</td></tr>`}</tbody>
               </table>
+            </div>
+          </div>
+        `;
+      }
+
+      function renderAssistantStructured(turn) {
+        const core = turn.parsed || {};
+        const views = Array.isArray(core?.warehouse_views) ? core.warehouse_views : [];
+        const recs = Array.isArray(core?.recommendations) ? core.recommendations : [];
+        const explanation = summarize(core);
+        const recsHtml = renderRecommendations(recs);
+        const viewsHtml = views.length
+          ? views.map((view) => renderStaticWarehouseView(view)).join("")
+          : `<div class="small">No warehouse projection available.</div>`;
+        const csvHtml = Array.isArray(turn.csvRows) && turn.csvRows.length
+          ? renderExactCsvRows(turn.csvRows)
+          : "";
+        return `
+          <div class="status ok">Structured response</div>
+          <div class="summary-card">
+            <div class="assistant-summary">${esc(explanation)}</div>
+          </div>
+          ${recsHtml}
+          ${viewsHtml}
+          ${csvHtml}
+          <details>
+            <summary class="small">Raw response</summary>
+            <pre>${esc(turn.raw || "")}</pre>
+          </details>
+        `;
+      }
+
+      function renderAssistantTurn(turn) {
+        if (turn.kind === "pending") {
+          return `
+            <div class="message-row assistant">
+              <div class="message assistant">
+                <div class="message-label">Assistant</div>
+                <div class="bubble">
+                  <div class="thinking">
+                    <span>${esc(turn.content || "Thinking")}</span>
+                    <span class="thinking-dot"></span>
+                    <span class="thinking-dot"></span>
+                    <span class="thinking-dot"></span>
+                  </div>
+                </div>
+              </div>
             </div>
           `;
         }
-        select.addEventListener("change", () => renderWarehouse(Number(select.value)));
-        renderWarehouse(0);
+
+        if (turn.kind === "structured") {
+          return `
+            <div class="message-row assistant">
+              <div class="message assistant">
+                <div class="message-label">Assistant</div>
+                <div class="bubble">${renderAssistantStructured(turn)}</div>
+              </div>
+            </div>
+          `;
+        }
+
+        const summaryClass = turn.kind === "error" ? "summary-card error" : "summary-card";
+        const status = turn.kind === "error"
+          ? `<div class="status warn">Needs attention</div>`
+          : "";
+        const rawBlock = turn.raw && turn.raw !== turn.content
+          ? `
+            <details>
+              <summary class="small">Raw response</summary>
+              <pre>${esc(turn.raw)}</pre>
+            </details>
+          `
+          : "";
+        const errorBody = turn.kind === "error"
+          ? `
+            <div class="error-card">
+              <div class="error-title">${esc(turn.errorMeta?.title || "Request failed")}</div>
+              <div class="error-detail">${esc(turn.content || "")}</div>
+              ${turn.errorMeta?.hint ? `<div class="error-hint"><strong>What to check:</strong><br>${esc(turn.errorMeta.hint)}</div>` : ""}
+            </div>
+          `
+          : `<div class="assistant-text">${esc(turn.content || "")}</div>`;
+        return `
+          <div class="message-row assistant">
+            <div class="message assistant">
+              <div class="message-label">Assistant</div>
+              <div class="bubble">
+                ${status}
+                <div class="${summaryClass}">
+                  ${errorBody}
+                </div>
+                ${rawBlock}
+              </div>
+            </div>
+          </div>
+        `;
       }
 
-      $("toggleAdvanced").onclick = () => {
-        $("advanced").classList.toggle("hidden");
-      };
+      function renderEmptyState() {
+        return `
+          <div class="empty-state">
+            <h2>What should we reorder?</h2>
+            <p>Ask a natural question, keep the answer visible, and continue with follow-ups just like a chat thread.</p>
 
-      document.querySelectorAll(".chip").forEach((chip) => {
-        chip.onclick = () => {
-          $("prompt").value = chip.dataset.q;
-          $("prompt").focus();
-        };
-      });
+            <div class="starter-section">
+              <div class="section-label">Starter prompts</div>
+              <div class="chips">
+                <button class="chip" type="button" data-q="Give me core reordering for item 3072145">
+                  <strong>Item 3072145</strong>
+                  <span>Get a reorder recommendation</span>
+                </button>
+                <button class="chip" type="button" data-q="Give me core reordering for item 3067481">
+                  <strong>Item 3067481</strong>
+                  <span>Run another common item</span>
+                </button>
+                <button class="chip" type="button" data-q="Give me core reordering for item 3067481, warehouse SE01WH">
+                  <strong>Item 3067481 in SE01WH</strong>
+                  <span>Include a warehouse in the prompt</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        `;
+      }
 
-      $("prompt").addEventListener("keydown", (e) => {
-        if (e.key === "Enter" && !e.shiftKey) {
-          e.preventDefault();
-          $("run").click();
+      function renderTranscript() {
+        const thread = $("thread");
+        if (!conversationTurns.length) {
+          thread.innerHTML = renderEmptyState();
+          return;
         }
-      });
+
+        const turnsHtml = conversationTurns.map((turn) => {
+          if (turn.role === "User") {
+            return `
+              <div class="message-row user">
+                <div class="message user">
+                  <div class="message-label">You</div>
+                  <div class="bubble">${esc(turn.content || "")}</div>
+                </div>
+              </div>
+            `;
+          }
+          return renderAssistantTurn(turn);
+        }).join("");
+
+        thread.innerHTML = `<div class="thread-list">${turnsHtml}</div>`;
+        scrollThreadToBottom();
+      }
+
+      function addUserTurn(content) {
+        conversationTurns.push({ role: "User", kind: "text", content });
+      }
+
+      function addAssistantTurn({ content, raw, parsed, csvRows, kind, errorMeta }) {
+        conversationTurns.push({
+          role: "Assistant",
+          kind: kind || (parsed ? "structured" : "text"),
+          content: content || "",
+          raw: raw || content || "",
+          parsed: parsed || null,
+          csvRows: Array.isArray(csvRows) ? csvRows : [],
+          errorMeta: errorMeta || null,
+        });
+      }
+
+      function addPendingAssistant(content) {
+        conversationTurns.push({
+          role: "Assistant",
+          kind: "pending",
+          content: content || "Thinking",
+        });
+      }
+
+      function replacePendingAssistant(nextTurn) {
+        if (conversationTurns.length && conversationTurns[conversationTurns.length - 1].kind === "pending") {
+          conversationTurns.pop();
+        }
+        addAssistantTurn(nextTurn);
+      }
+
+      function normalizeError(error, hint) {
+        const rawError = String(error || "").trim();
+        const rawHint = String(hint || "").trim();
+        const combined = `${rawError}\n${rawHint}`.toLowerCase();
+
+        if (combined.includes("azure credential is required")) {
+          return {
+            title: "Backend authentication is not configured",
+            detail: "The UI reached the API, but the agent could not start because the local server session does not have the required Azure credentials.",
+            hint: rawHint || "Restart the API with the project virtual environment and confirm the required values are present in .env.",
+            raw: [rawError, rawHint].filter(Boolean).join("\n\n"),
+          };
+        }
+
+        if (combined.includes("failed to fetch") || combined.includes("actively refused it") || combined.includes("connection refused")) {
+          return {
+            title: "Cannot reach the local API",
+            detail: "The browser could not talk to the local backend on the configured API URL.",
+            hint: rawHint || "Check that the API server is running on the expected port, then try again.",
+            raw: [rawError, rawHint].filter(Boolean).join("\n\n"),
+          };
+        }
+
+        return {
+          title: "Request failed",
+          detail: rawError || "Something went wrong while processing the request.",
+          hint: rawHint,
+          raw: [rawError, rawHint].filter(Boolean).join("\n\n"),
+        };
+      }
+
+      function replacePendingWithError(error, hint) {
+        if (conversationTurns.length && conversationTurns[conversationTurns.length - 1].kind === "pending") {
+          conversationTurns.pop();
+        }
+        const formatted = normalizeError(error, hint);
+        addAssistantTurn({
+          content: formatted.detail,
+          raw: formatted.raw,
+          kind: "error",
+          errorMeta: {
+            title: formatted.title,
+            hint: formatted.hint,
+          },
+        });
+      }
 
       async function runQuery() {
-        const result = $("result");
         const baseUrl = $("baseUrl").value.trim().replace(/\/+$/, "");
-        const promptInput = $("prompt").value.trim();
-        if (!promptInput) return;
+        const message = $("prompt").value.trim();
+        if (!message || isSubmitting) return;
+        const useFreshSimulation = shouldUseFreshSimulationRequest(message);
 
-        result.innerHTML = `<div class="small">Running\u2026 (this may take up to a minute)</div>`;
+        addUserTurn(message);
+        addPendingAssistant(useFreshSimulation ? "Running fresh simulation" : "Thinking");
+        $("prompt").value = "";
+        autoResizePrompt();
+        renderTranscript();
+        setSubmitting(true);
+
         try {
-          const resp = await fetch(`${baseUrl}/api/query`, {
+          const endpoint = useFreshSimulation ? "/api/query" : "/api/chat";
+          const payload = useFreshSimulation
+            ? {
+                prompt: buildFreshSimulationPrompt(message),
+                store_id: "ALL",
+                start_date: null,
+                end_date: null,
+              }
+            : {
+                message,
+                conversation_id: currentConversationId,
+              };
+          const resp = await fetch(`${baseUrl}${endpoint}`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+          });
+          const data = await resp.json();
+
+          if (data?.error) {
+            replacePendingWithError(data.error, data.hint);
+            renderTranscript();
+            return;
+          }
+
+          if (!useFreshSimulation) {
+            currentConversationId = data?.conversation_id || currentConversationId;
+          }
+          const raw = String(data?.response || "");
+          const parsed = toJsonOrNull(raw);
+          replacePendingAssistant({
+            content: parsed ? summarize(parsed) : raw,
+            raw,
+            parsed,
+          });
+          renderConversationMeta();
+          renderTranscript();
+        } catch (e) {
+          replacePendingWithError("Failed to fetch.", String(e));
+          renderTranscript();
+        } finally {
+          setSubmitting(false);
+          $("prompt").focus();
+        }
+      }
+
+      async function runExactSimulation() {
+        const baseUrl = $("baseUrl").value.trim().replace(/\/+$/, "");
+        const itemNumber = $("itemNumber").value.trim();
+        const warehouseCode = $("warehouseCode").value.trim() || "DK01WH";
+        if (!itemNumber || isSubmitting) return;
+
+        addUserTurn(`Run exact simulation for item ${itemNumber} in warehouse ${warehouseCode}.`);
+        addPendingAssistant("Running exact simulation");
+        renderTranscript();
+        setSubmitting(true);
+
+        try {
+          const resp = await fetch(`${baseUrl}/api/exact-simulate`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
-              prompt: promptInput,
-              store_id: "ALL",
-              start_date: null,
-              end_date: null,
+              item_number: itemNumber,
+              warehouse_code: warehouseCode,
+              conversation_id: currentConversationId,
             }),
           });
           const data = await resp.json();
-          const raw = typeof data?.response === "string" ? data.response : JSON.stringify(data, null, 2);
-          const parsed = typeof data?.response === "string" ? toJsonOrNull(data.response) : null;
-
-          if (parsed && (Array.isArray(parsed.warehouse_views) || Array.isArray(parsed.recommendations) || Array.isArray(parsed.weekly_projection))) {
-            renderCoreTable(parsed, raw);
-            return;
-          }
 
           if (data?.error) {
-            result.innerHTML = `
-              <div class="status warn">Error</div>
-              <div class="explain">${esc(data.error)}</div>
-              ${data.hint ? `<div class="small">${esc(data.hint)}</div>` : ""}
-            `;
+            replacePendingWithError(data.error, data.hint);
+            renderTranscript();
             return;
           }
 
-          result.innerHTML = `
-            <div class="status ok">Text response</div>
-            <div class="explain">${esc(raw)}</div>
-            <details>
-              <summary class="small">Raw JSON envelope</summary>
-              <pre>${esc(JSON.stringify(data, null, 2))}</pre>
-            </details>
-          `;
+          currentConversationId = data?.conversation_id || currentConversationId;
+          const parsed = data?.response || null;
+          const raw = JSON.stringify(parsed, null, 2);
+          replacePendingAssistant({
+            content: parsed ? summarize(parsed) : raw,
+            raw,
+            parsed,
+            csvRows: data?.csv_rows,
+          });
+          renderConversationMeta();
+          renderTranscript();
         } catch (e) {
-          result.innerHTML = `
-            <div class="status warn">Failed to fetch</div>
-            <div class="explain">${esc(String(e))}</div>
-            <div class="small">Confirm API is running and base URL is correct.</div>
-          `;
+          replacePendingWithError("Failed to fetch.", String(e));
+          renderTranscript();
+        } finally {
+          setSubmitting(false);
+          $("prompt").focus();
         }
       }
 
+      $("prompt").addEventListener("input", autoResizePrompt);
+      $("prompt").addEventListener("keydown", (e) => {
+        if (e.key === "Enter" && !e.shiftKey) {
+          e.preventDefault();
+          runQuery();
+        }
+      });
+
+      ["itemNumber", "warehouseCode"].forEach((id) => {
+        $(id).addEventListener("keydown", (e) => {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            runExactSimulation();
+          }
+        });
+      });
+
       $("run").onclick = runQuery;
+      $("runExact").onclick = runExactSimulation;
+
+      $("newChat").onclick = () => {
+        currentConversationId = null;
+        conversationTurns = [];
+        renderConversationMeta();
+        renderTranscript();
+        $("prompt").focus();
+      };
+
+      $("toggleSettings").onclick = () => {
+        $("settingsPanel").classList.toggle("hidden");
+      };
+
+      $("toggleExact").onclick = () => {
+        $("exactPanel").classList.toggle("hidden");
+      };
+
+      document.addEventListener("click", (e) => {
+        const promptChip = e.target.closest("[data-q]");
+        if (promptChip) {
+          $("prompt").value = promptChip.dataset.q || "";
+          autoResizePrompt();
+          $("prompt").focus();
+          return;
+        }
+
+        const exactChip = e.target.closest("[data-item]");
+        if (exactChip) {
+          $("itemNumber").value = exactChip.dataset.item || "";
+          $("warehouseCode").value = exactChip.dataset.wh || "DK01WH";
+          $("exactPanel").classList.remove("hidden");
+          $("itemNumber").focus();
+        }
+      });
+
+      renderConversationMeta();
+      renderTranscript();
+      autoResizePrompt();
     </script>
   </body>
 </html>
