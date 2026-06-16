@@ -197,18 +197,22 @@ def get_item_ordering_data(
     item_number: str,
     central_warehouse_code: Optional[str] = None,
     include_all_warehouses: bool = False,
+    n_weeks: int = 53,
 ) -> Dict[str, Any]:
     """
     Fetch raw tables needed for a core reorder decision in ONE call.
 
     Returns item master, warehouse config, raw forecast/demand/stock tables,
-    cover configs, leadtime calendar, and a 53-week timeline.
+    cover configs, leadtime calendar, and an n_weeks-week timeline.
     The agent is responsible for all aggregation and reorder logic.
+
+    n_weeks: number of weeks to fetch (default 53, set to the user-chosen simulation length).
 
     include_all_warehouses=True: also return a multi_warehouse_summary and warehouse
     master for every warehouse that carries the item (ignored when central_warehouse_code
     is supplied).
     """
+    n_weeks = max(1, min(int(n_weeks), 53))
     if not (item_number or "").strip():
         return {"status": "error", "message": "item_number required", "tables": {}}
 
@@ -297,18 +301,18 @@ def get_item_ordering_data(
         "CentralWarehouseKey",
         "CartonSize",
         "CloseStockWk00",
-        _week_cols("CloseStock"),
-        _week_cols("Demand"),
-        _week_cols("StockIn"),
-        _week_cols("InTransit"),
+        _week_cols("CloseStock", end=n_weeks),
+        _week_cols("Demand", end=n_weeks),
+        _week_cols("StockIn", end=n_weeks),
+        _week_cols("InTransit", end=n_weeks),
     ])
     forecast_store_select = ", ".join([
         "ItemKey",
         "StoreKey",
         "CentralWarehouseKey",
         "ForecastTotal",
-        _week_cols("Forecast"),
-        _week_cols("CoverQty"),
+        _week_cols("Forecast", end=n_weeks),
+        _week_cols("CoverQty", end=n_weeks),
     ])
     tables["fpo_tbl_CalcStoreStock"] = _query_item_wh(
         "fpo.tbl_CalcStoreStock", item_key, wh_key, select=calc_store_select
@@ -330,10 +334,10 @@ def get_item_ordering_data(
         "fpo.tbl_ItemWarehouseLeadtime", item_key, wh_key
     )
 
-    # 53-week calendar from current week
+    # n_weeks-week calendar from current week
     start_week = _get_current_calc_week_no()
     tables["fpo_tbl_CalcTimelineWeek"], _ = _query_safe(
-        "SELECT TOP 53 CalcWeekNo, YearAndWeek, WeekStartDate, WeekEndDate "
+        f"SELECT TOP {n_weeks} CalcWeekNo, YearAndWeek, WeekStartDate, WeekEndDate "
         "FROM fpo.tbl_CalcTimelineWeek WHERE CalcWeekNo >= ? ORDER BY CalcWeekNo",
         [start_week],
     )
@@ -383,17 +387,17 @@ def get_item_ordering_data(
     # forecast_by_week:      SUM(ForecastStoreSales.ForecastWkNN) per week (raw forecast units)
     # ststock_by_week:       SUM(CalcStoreStock.CloseStockWkNN) per week (closing store stock)
     demand_by_week = _aggregate_weekly_series(
-        "fpo.tbl_CalcStoreStock", "Demand", item_key, wh_key, "demand"
+        "fpo.tbl_CalcStoreStock", "Demand", item_key, wh_key, "demand", n_weeks=n_weeks
     )
     store_stockin_by_week = _aggregate_weekly_series(
-        "fpo.tbl_CalcStoreStock", "StockIn", item_key, wh_key, "stockin"
+        "fpo.tbl_CalcStoreStock", "StockIn", item_key, wh_key, "stockin", n_weeks=n_weeks
     )
     forecast_by_week = _aggregate_weekly_series(
-        "fpo.tbl_ForecastStoreSales", "Forecast", item_key, wh_key, "forecast"
+        "fpo.tbl_ForecastStoreSales", "Forecast", item_key, wh_key, "forecast", n_weeks=n_weeks
     )
     ststock_by_week = _aggregate_weekly_series(
         "fpo.tbl_CalcStoreStock", "CloseStock", item_key, wh_key, "ststock",
-        positive_only=True,
+        n_weeks=n_weeks, positive_only=True,
     )
 
     result: Dict[str, Any] = {
