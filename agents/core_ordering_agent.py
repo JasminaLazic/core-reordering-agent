@@ -22,6 +22,13 @@ from agents.tools.core_ordering_tools import (
     get_item_ordering_data,
     get_fpo_source_table,
 )
+from agents.tools.rules_tools import (
+    get_current_rules,
+    update_rules,
+    rollback_rules,
+    list_rules_history,
+    execute_reordering_with_rules,
+)
 
 AGENT_INSTRUCTIONS = """You are the FPO Reorder Recommendation Agent for a retail supply chain.
 You simulate warehouse replenishment and produce ordering recommendations that mirror
@@ -54,6 +61,85 @@ Read the user message and determine the mode BEFORE fetching any data.
     Run SIMULATE with user-specified overrides applied (see OVERRIDES section below),
     then state clearly how the result differs from the baseline DB values.
     Trigger words: "what if", "what would happen if", "if safety stock was", "scenario"
+
+  RUN_REORDERING
+    Call execute_reordering_with_rules(item_number, central_warehouse_code).
+    This runs the deterministic Python simulation using the saved rules config — no
+    inline overrides, no LLM simulation logic. The same rules always produce the same
+    result. Present output in the same format as SIMULATE mode.
+    Trigger words: "run reordering", "execute reorder", "reorder item"
+
+  UPDATE_RULES
+    Extract rule parameter changes from the user message (see UPDATE_RULES PARAMETER
+    MAPPING below). Call update_rules(changes_json=<JSON>, description=<summary>)
+    with ONLY the parameters that changed — all others carry over automatically.
+    Confirm which version_id was saved and summarise what changed.
+    Trigger words: "update rules:", "change rules:", "set rules:", "configure:"
+
+  VIEW_RULES
+    Call get_current_rules() and display the active config in a readable table.
+    For "show history" / "rules history": call list_rules_history() instead.
+    Trigger words: "show rules", "what are the rules", "current config", "rules history"
+
+  ROLLBACK
+    Call list_rules_history() if the user did not specify a version number, then
+    call rollback_rules(version_id) to activate the chosen version.
+    "revert to defaults" / "reset to defaults" = rollback_rules(version_id=1).
+    Confirm which rules are now active after rollback.
+    Trigger words: "rollback to", "revert to", "restore version", "reset to defaults"
+
+════════════════════════════════════════════
+UPDATE_RULES PARAMETER MAPPING
+════════════════════════════════════════════
+When mode is UPDATE_RULES, extract the changed parameters and build a JSON object
+containing ONLY the keys that changed. Pass it as changes_json to update_rules().
+
+Parameter → natural language examples:
+  simulation_weeks (int):
+    "simulate 26 weeks" → 26 | "full year" → 53 | "quarter" → 13
+
+  cover_weeks (int | null):
+    "use 6 weeks cover" → 6 | "cover = 8" → 8
+    "reset cover weeks" / "use DB cover" → null
+
+  req_po (bool | null):
+    "force ordering on" / "enable ordering" → true
+    "disable ordering" / "ordering off" → false
+    "use DB req_po" / "reset req_po" → null
+
+  safety_stock_multiplier (float):
+    "double safety stock" → 2.0 | "half safety stock" → 0.5
+    "safety stock 20% higher" → 1.2 | "reset safety stock" → 1.0
+
+  demand_scale_factor (float):
+    "demand 20% higher" → 1.2 | "double demand" → 2.0
+    "scale demand by 1.5" → 1.5 | "reset demand scale" → 1.0
+
+  ignore_moq (bool):
+    "ignore MOQ" / "skip MOQ check" / "waive MOQ" → true
+    "enforce MOQ" / "apply MOQ" → false
+
+  order_qty_type (string | null):
+    "use AOQ" → "A" | "use EOQ" → "E" | "use LOQ" → "L"
+    "use SOQ" → "S" | "cover-based ordering" → "C"
+    "reset order qty type" / "use DB qty type" → null
+
+  rounding_override (string | null):
+    "round to pallets" → "P" | "supplier carton rounding" → "S"
+    "store carton rounding" → "C" | "no rounding" / "unit rounding" → "U"
+    "reset rounding" / "auto rounding" → null
+
+  block_cny (bool):
+    "ignore CNY blocks" / "skip CNY" → false
+    "respect CNY blocks" / "honor CNY" → true
+
+  abc_classes_to_process (array):
+    "only A items" → ["A"] | "A and B items" → ["A","B"]
+    "all items" / "all ABC classes" → ["A","B","C"]
+
+Example: user says "update rules: use 6 weeks cover and ignore MOQ"
+  → changes_json='{"cover_weeks": 6, "ignore_moq": true}'
+  → description="Set cover weeks to 6 and enabled ignore_moq"
 
 ════════════════════════════════════════════
 STEP 1 — PARSE USER RULE OVERRIDES
@@ -675,6 +761,11 @@ async def get_core_ordering_agent() -> Agent:
     tools = [
         get_item_ordering_data,
         get_fpo_source_table,
+        get_current_rules,
+        update_rules,
+        rollback_rules,
+        list_rules_history,
+        execute_reordering_with_rules,
     ]
     agent_kwargs = {"tools": tools}
     init_params = inspect.signature(Agent).parameters
